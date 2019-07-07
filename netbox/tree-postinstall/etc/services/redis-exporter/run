@@ -1,0 +1,3 @@
+#!/bin/sh
+[ ! -e /run/log/redis-exporter ] && mkfifo /run/log/redis-exporter
+exec /usr/local/bin/redis_exporter --web.listen-address=127.0.0.1:9121 > /run/log/redis-exporter 2>&1

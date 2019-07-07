@@ -1,34 +1,39 @@
 reverse_exporters:
-- path: /metrics
-  exporters:
-  - http:
-      address: http://127.0.0.1:9187/metrics
-      name: postgresql
-      timeout: 1s
-  - http:
-      address: http://127.0.0.1:9113/metrics
-      name: nginx
-      timeout: 1s
-  - http:
-      address: http://127.0.0.1:80/lua_metrics
-      name: nginx-vhosts
-      timeout: 1s
-  - http:
-      # Note we have to account for the external-url paths
-      address: http://127.0.0.1:9100/metrics
-      name: node_exporter
-      timeout: 1s
-  - http:
-      # Note we have to account for the external-url paths
-      address: http://127.0.0.1:9090/monitoring/metrics
-      name: prometheus
-      timeout: 1s
-  - http:
-      # Note we have to account for the external-url paths
-      address: http://127.0.0.1:9094/alerts/metrics
-      name: alertmanager
-      timeout: 1s
-  - exec:
-      command: /certificate_metrics.bsh
-      name: certificates
-      timeout: 1s
+  - path: /metrics
+    exporters:
+      - http:
+          address: http://127.0.0.1:9187/metrics
+          name: postgresql
+          timeout: 1s
+      - http:
+          address: http://127.0.0.1:9113/metrics
+          name: nginx
+          timeout: 1s
+      - http:
+          address: http://127.0.0.1:80/lua_metrics
+          name: nginx-vhosts
+          timeout: 1s
+      - http:
+          # Note we have to account for the external-url paths
+          address: http://127.0.0.1:9100/metrics
+          name: node_exporter
+          timeout: 1s
+      - http:
+          # Note we have to account for the external-url paths
+          address: http://127.0.0.1:9121/metrics
+          name: redis
+          timeout: 1s
+      - http:
+          # Note we have to account for the external-url paths
+          address: http://127.0.0.1:9090/monitoring/metrics
+          name: prometheus
+          timeout: 1s
+      - http:
+          # Note we have to account for the external-url paths
+          address: http://127.0.0.1:9094/alerts/metrics
+          name: alertmanager
+          timeout: 1s
+      - exec:
+          command: /certificate_metrics.bsh
+          name: certificates
+          timeout: 1s

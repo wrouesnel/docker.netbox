@@ -20,6 +20,7 @@ ARG URL_ALERTMANAGER=https://github.com/prometheus/alertmanager/releases/downloa
 ARG URL_NODEEXPORTER=https://github.com/prometheus/node_exporter/releases/download/v0.16.0-rc.1/node_exporter-0.16.0-rc.1.linux-amd64.tar.gz
 ARG URL_WEBHOOK=https://github.com/adnanh/webhook/releases/download/2.6.5/webhook-linux-amd64.tar.gz
 ARG URL_MAKECERTS=https://github.com/wrouesnel/makecerts/releases/download/v0.4/makecerts.x86_64
+ARG URL_REDIS_EXPORTER=https://github.com/oliver006/redis_exporter/releases/download/v1.0.3/redis_exporter-v1.0.3.linux-amd64.tar.gz
 
 ARG http_proxy=
 ARG https_proxy=
@@ -32,9 +33,11 @@ RUN find -path '/tmp/*.asc' -exec /bin/bash -c 'apt-key add {} && rm -f {}' \;
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
     postgresql-10 postgresql-10-repmgr barman barman-cli \
+    redis-server \
     nginx-extras libluajit-5.1-dev liblua5.3-0 libnginx-mod-http-lua \
     runit \
     syslog-ng-core syslog-ng-mod-json \
+    netcat \
     openssl \
     pwgen \
     wget curl dnsutils apache2-utils net-tools iproute2 rsync sudo jq ssl-cert less expect nano \
@@ -66,6 +69,9 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --no-instal
     # Prometheus node_exporter
     wget -O - $URL_NODEEXPORTER | tar -xzvf - --strip-components=1 -C /usr/local/bin/ && \
     chmod +x /usr/local/bin/node_exporter && \
+    # Prometheus redis_exporter
+    wget -O - $URL_REDIS_EXPORTER | tar -xzvf - --strip-components=1 -C /usr/local/bin/ && \
+    chmod +x /usr/local/bin/redis_exporter && \
     # Prometheus
     mkdir -p /opt/prometheus && \
     wget -O - $URL_PROMETHEUS | tar -xzvf - --strip-components=1 -C /opt/prometheus/ && \
@@ -185,9 +191,11 @@ ENV \
     DEV_NETBOX_REMOTE_DEBUG_PORT=51234 \
     DEV_NETBOX_REMOTE_DEBUG_ENABLE=no \
     NETBOX_WEB_SECRET= \
+    NETBOX_CHANGELOG_RETENTION_DAYS=0 \
     NETBOX_PREFIX_PATH= \
     NETBOX_ADMIN_EMAIL= \
     NETBOX_ADMIN_NAME="Netbox Admin" \
+    NETBOX_TIMEZONE=UTC \
     NETBOX_LDAP_AUTH=yes \
     NETBOX_LDAP_SERVER_URI= \
     NETBOX_LDAP_SERVER_BIND_BN=  \

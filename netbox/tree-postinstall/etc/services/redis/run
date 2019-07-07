@@ -1,0 +1,6 @@
+#!/bin/bash
+
+[ ! -e /run/log/redis ] && mkfifo /run/log/redis
+
+BIN=$(which redis-server)
+exec sudo -u redis "$BIN" /etc/redis/redis.conf > /run/log/redis 2>&1

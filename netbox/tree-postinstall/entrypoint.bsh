@@ -27,7 +27,7 @@ function stdbool() {
     if [ -z "$1" ] ; then
         echo "n"
     else
-        echo ${1:0:1} | tr [A-Z] [a-z]
+        echo "${1:0:1}" | tr "[:upper:]" "[:lower:]"
     fi
 }
 
@@ -201,6 +201,7 @@ export ALERTMANAGER_PEERS_FILE="/run/alertmanager_peers.env"
 touch $ALERTMANAGER_PEERS_FILE
 export ALERTMANAGER_DATA_DIRECTORY=$DATA_DIR/alertmanager
 export DATA_TMP_DIR="$DATA_DIR/tmp"
+export REDIS_DATA_DIR=$DATA_DIR/redis
 
 # Make the data tmp dir if needed
 mkdir -p "$DATA_TMP_DIR" || fatal "Could not make data temporary directory"
@@ -576,6 +577,18 @@ log "Ensure data dir permissions..."
 mkdir -p "$NETBOX_DATA_DIR"/{media,reports,static}
 chmod 0711 "$NETBOX_DATA_DIR"
 chmod 0711 "$NETBOX_DATA_DIR"/{media,reports,static}
+
+log "Bringing up redis now to let static file collection work."
+mkdir -p "$REDIS_DATA_DIR" || fatal "Could not create redis data directory"
+chown redis: "$REDIS_DATA_DIR" || fatal "Could not set ownership on redis data directory"
+cp -af /etc/services/redis /run/services/redis || fatal "Failed to copy unit files for redis"
+sv restart syslog-ng
+
+log "Looping to wait for redis to start..."
+while ! nc -z 127.0.0.1 6379 ; do
+    true
+done
+log "Redis daemon is up. Continuing."
 
 log "Collecting static files for netbox..."
 ( cd /opt/netbox/netbox && python3 manage.py collectstatic --no-input ) || \

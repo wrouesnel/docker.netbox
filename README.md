@@ -139,6 +139,26 @@ at build time. Otherwise they are defined, but harmless.
 * `DEV_NETBOX_REMOTE_DEBUG_PORT=51234` Set the port for the debugger to listen on.
 * `DEV_NETBOX_REMOTE_DEBUG_ENABLE=no` Enable the remote debugger port.
 
+* `NETBOX_WEB_SECRET=`
+  Web secret for client tokens. Leave blank to randomly generate. Only needs to be
+  set if clustering.
+
+* `NETBOX_CHANGELOG_RETENTION_DAYS=0`
+  Number of days to retain changelog changes. 0 for infinity.
+
+* `NETBOX_PREFIX_PATH=`
+  Path prefix netbox is being hosted under. Use only if reverse proxying behind a prefix.
+
+* `NETBOX_ADMIN_EMAIL=`
+  If set, becomes an email which Netbox will send notifications too using the SMTP settings.
+  This is different then the alert system.
+
+* `NETBOX_ADMIN_NAME="Netbox Admin"`
+  Name of the Netbox admin in emails. No need to change generally.
+
+* `NETBOX_TIMEZONE=UTC`
+  Timezone for Netbox.
+
 * `NETBOX_LDAP_AUTH=yes`
   enable LDAP auth. Otherwise it is disabled.
 
