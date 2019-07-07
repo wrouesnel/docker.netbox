@@ -1,22 +1,22 @@
 sudo: required
 services:
-- docker
+  - docker
 before_install:
-- curl -fsSL http://apt.dockerproject.org/gpg | sudo apt-key add -
-- sudo add-apt-repository "deb https://apt.dockerproject.org/repo ubuntu-$(lsb_release
-  -cs) main"
-- sudo apt-get update
-- sudo apt-get -y -o Dpkg::Options::="--force-confnew" install docker-engine
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+  - sudo add-apt-repository "deb https://download.docker.com/linux/ubuntu $(lsb_release
+    -cs) main"
+  - sudo apt-get update
+  - sudo apt-get -y -o Dpkg::Options::="--force-confnew" install docker-ce
 script:
-- export TAG=$TRAVIS_BUILD_NUMBER
-- make all
-- docker tag $(cat .dockerid) $DOCKER_IMAGE:$TAG
+  - export TAG=$TRAVIS_BUILD_NUMBER
+  - make all
+  - docker tag $(cat .dockerid) $DOCKER_IMAGE:$TAG
 after_success:
-- |-
-  if [ $TRAVIS_PULL_REQUEST != "true" ]; then docker login -u $DOCKER_USER -p $DOCKER_PASS ; export TAG=`if [ "$TRAVIS_BRANCH" == "master" ]; then echo "latest"; else echo $TRAVIS_BRANCH ; fi` ;
-  docker tag $DOCKER_IMAGE:$TRAVIS_BUILD_NUMBER $DOCKER_IMAGE:$TAG ; if [ ! -z "$TRAVIS_TAG" ]; then docker tag $DOCKER_IMAGE:$TRAVIS_BUILD_NUMBER $DOCKER_IMAGE:$TRAVIS_TAG ; fi ; docker rmi $DOCKER_IMAGE:$TRAVIS_BUILD_NUMBER ; docker push $DOCKER_IMAGE ; fi
+  - |-
+    if [ $TRAVIS_PULL_REQUEST != "true" ]; then docker login -u $DOCKER_USER -p $DOCKER_PASS ; export TAG=`if [ "$TRAVIS_BRANCH" == "master" ]; then echo "latest"; else echo $TRAVIS_BRANCH ; fi` ;
+    docker tag $DOCKER_IMAGE:$TRAVIS_BUILD_NUMBER $DOCKER_IMAGE:$TAG ; if [ ! -z "$TRAVIS_TAG" ]; then docker tag $DOCKER_IMAGE:$TRAVIS_BUILD_NUMBER $DOCKER_IMAGE:$TRAVIS_TAG ; fi ; docker rmi $DOCKER_IMAGE:$TRAVIS_BUILD_NUMBER ; docker push $DOCKER_IMAGE ; fi
 env:
   global:
-  - DOCKER_IMAGE=wrouesnel/netbox
-  - DOCKER_USER=wrouesnel
-  - secure: a56fNyM45ANqMZjPEWt5Pqo0xdcUOLO7ZQ9z98w9KMO9eeLDvOvwfSAwNoRHwDK6qmzRhZE4daRlo/Gdx+qPHPtSBtQMKBcfwxwBqDkUP1MFSv7bsL2ondBkaBS3ZCFursC4DKMiCqud1y2cVwHIO8m9Lc4Bs6oz/3nr7ut58y404pFr+AMu3DLxn3u4+RRObdmi+56yttzfXg1E9QbxVtr4FmwiuCUcE0vqyZGBgoqKirFnnNsPCv7dQVtjRard/LlojHyDnKlDOELR7y2hZ/UWoCyM0eWfVwwdkNfMd5zfLOXs0uzZChBD1T225uo4ia9d8it0JsSus1Q28EWT0T3nVtdBb8SVUQy5S+9MxrHYlwKIFRJyxuEHjhuoFMhOMG2GzarX26Qoy5JKC2khEk6c6THc/o+837pPVks8/be6LFwLJjyxPLtztu2nQg4d2pPgOifytvmYWGxv+jE4epgP5EbQlkseulK0ULY7kxiInhGtMY5nd2Fh1CTEeMQfTLkWuWaTX5o8sNKxnmmq/2j456zwJOuryUMkkMstsyJBH2b1YoAiSXyjBE1LAO01eAWz9oj+6k5PAkkroFN/IZcYcWdt0B+530rRV8eVwvBTrtXKZ2oNZJNeGAxAZGlN2xOj0G2+w0aRDTBbZelgUeNmihJ85+IHvtLPP3qIBvI=
+    - DOCKER_IMAGE=wrouesnel/netbox
+    - DOCKER_USER=wrouesnel
+    - secure: a56fNyM45ANqMZjPEWt5Pqo0xdcUOLO7ZQ9z98w9KMO9eeLDvOvwfSAwNoRHwDK6qmzRhZE4daRlo/Gdx+qPHPtSBtQMKBcfwxwBqDkUP1MFSv7bsL2ondBkaBS3ZCFursC4DKMiCqud1y2cVwHIO8m9Lc4Bs6oz/3nr7ut58y404pFr+AMu3DLxn3u4+RRObdmi+56yttzfXg1E9QbxVtr4FmwiuCUcE0vqyZGBgoqKirFnnNsPCv7dQVtjRard/LlojHyDnKlDOELR7y2hZ/UWoCyM0eWfVwwdkNfMd5zfLOXs0uzZChBD1T225uo4ia9d8it0JsSus1Q28EWT0T3nVtdBb8SVUQy5S+9MxrHYlwKIFRJyxuEHjhuoFMhOMG2GzarX26Qoy5JKC2khEk6c6THc/o+837pPVks8/be6LFwLJjyxPLtztu2nQg4d2pPgOifytvmYWGxv+jE4epgP5EbQlkseulK0ULY7kxiInhGtMY5nd2Fh1CTEeMQfTLkWuWaTX5o8sNKxnmmq/2j456zwJOuryUMkkMstsyJBH2b1YoAiSXyjBE1LAO01eAWz9oj+6k5PAkkroFN/IZcYcWdt0B+530rRV8eVwvBTrtXKZ2oNZJNeGAxAZGlN2xOj0G2+w0aRDTBbZelgUeNmihJ85+IHvtLPP3qIBvI=
