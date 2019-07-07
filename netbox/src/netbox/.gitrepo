@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/git-commands/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/netbox-community/netbox.git
+	branch = develop
+	commit = 3da9af5a9f05b91c4132a531fc39960ec9212995
+	parent = 17763e1bd744d1f3bd95f76ee3a675c49987343f
+	method = merge
+	cmdver = 0.4.0
