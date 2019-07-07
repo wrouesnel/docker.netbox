@@ -1,0 +1,75 @@
+#!/bin/bash
+# Script which executes a binary backup and streams the result as a tar-formatted
+# archive to stdout. This is invoked via the container API to take backups.
+
+# Construct the tar archive in a streaming manner - backup the database first,
+# then collect static files (the assumption being the most.
+
+# The following set of hooks allow you to inline defer function and method calls
+# in bash until the script terminates. It *requires* a line like 
+# `trap "atexit_commands" INT TERM EXIT` in the body of the bash script in order to 
+# work. Functions are a stack, and are executed in reverse order.
+# Typical usage:
+# trap "atexit_commands ; exit 0" INT TERM EXIT
+# atexit echo "This is run at exit"
+
+function fatal() {
+    echo "$@" 1>&2
+    exit 1
+}
+
+function echoerr() {
+    echo "$@" 1>&2
+}
+
+export atexit_hooks=()
+function atexit() {
+    atexit_hooks+=( "$@" )
+}
+
+function atexit_commands() {
+    echoerr "Start running shutdown hooks"
+    local exit_status=0
+    for ((i=${#atexit_hooks[@]}-1; i >=0 ; i--)); do
+        # Execute only non-blank shutdown hooks.
+        if [ ! -z "${atexit_hooks[$i]}" ]; then
+            echoerr "Running shutdown command:" "${atexit_hooks[$i]}"
+            eval "${atexit_hooks[$i]}"
+            if [ $? -ne 0 ]; then
+                exit_status="$?"
+            fi
+            # Blank elements don't eval to anything, so are removed.
+            atexit_hooks[$i]='' 
+        fi
+    done
+    echoerr "Finish running shutdown hooks."
+    return $exit_status
+}
+
+trap 'atexit_commands ; exit 1' INT TERM
+trap 'atexit_commands' EXIT
+
+# FIXME: it would be nicer to just seamlessly stream the files.
+DATA_TMP_DIR="$DATA_DIR/tmp"
+
+WORK_DIR=$(mktemp -d -p "$DATA_TMP_DIR")
+atexit "rm -rf \"$WORK_DIR\" > /dev/null"
+
+echoerr "Backing up Postgres database"
+mkdir -p "$WORK_DIR/pg_basebackup" || fatal "mkdir failed: "${WORK_DIR}/pg_basebackup""
+if ! pg_basebackup --username=postgres --format=tar --pgdata="${WORK_DIR}/pg_basebackup" ; then
+    fatal "pg_basebackup failed."
+fi
+
+NETBOX_FILES="${DATA_DIR}/netbox"
+mkdir -p "$WORK_DIR/files" || fatal "mkdir failed: ${WORK_DIR}/files"
+echoerr "Backing up netbox user files"
+if ! tar -cf "${WORK_DIR}/files/netbox.tar" -C "${NETBOX_FILES}" . ; then
+    fatal "netbox files backup failed."
+fi
+
+# Stream the complete archive.
+tar -cvf - -C "${WORK_DIR}" .
+
+# If we got here, the backup is basically going to work, so do a live stream to the requestor.
+exit $?

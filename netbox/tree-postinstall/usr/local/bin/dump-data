@@ -1,0 +1,52 @@
+#!/bin/bash
+# Script which executes the Django dump data command
+
+# Construct the tar archive in a streaming manner - backup the database first,
+# then collect static files (the assumption being the most.
+
+# The following set of hooks allow you to inline defer function and method calls
+# in bash until the script terminates. It *requires* a line like 
+# `trap "atexit_commands" INT TERM EXIT` in the body of the bash script in order to 
+# work. Functions are a stack, and are executed in reverse order.
+# Typical usage:
+# trap "atexit_commands ; exit 0" INT TERM EXIT
+# atexit echo "This is run at exit"
+
+function fatal() {
+    echo "$@" 1>&2
+    exit 1
+}
+
+function echoerr() {
+    echo "$@" 1>&2
+}
+
+export atexit_hooks=()
+function atexit() {
+    atexit_hooks+=( "$@" )
+}
+
+function atexit_commands() {
+    echoerr "Start running shutdown hooks"
+    local exit_status=0
+    for ((i=${#atexit_hooks[@]}-1; i >=0 ; i--)); do
+        # Execute only non-blank shutdown hooks.
+        if [ ! -z "${atexit_hooks[$i]}" ]; then
+            echoerr "Running shutdown command:" "${atexit_hooks[$i]}"
+            eval "${atexit_hooks[$i]}"
+            if [ $? -ne 0 ]; then
+                exit_status="$?"
+            fi
+            # Blank elements don't eval to anything, so are removed.
+            atexit_hooks[$i]='' 
+        fi
+    done
+    echoerr "Finish running shutdown hooks."
+    return $exit_status
+}
+
+trap 'atexit_commands ; exit 1' INT TERM
+trap 'atexit_commands' EXIT
+
+python3 /opt/netbox/netbox/manage.py dumpdata
+exit $?

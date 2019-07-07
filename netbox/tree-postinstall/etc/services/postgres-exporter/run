@@ -1,0 +1,4 @@
+#!/bin/sh
+[ ! -e /run/log/postgres-exporter ] && mkfifo /run/log/postgres-exporter
+export DATA_SOURCE_NAME="user=postgres host=/var/run/postgresql/ sslmode=disable database=$PSQL_DB"
+exec /usr/local/bin/postgres_exporter --web.listen-address=127.0.0.1:9187 --extend.query-path=/run/postgres_exporter.queries.yml > /run/log/postgres-exporter 2>&1

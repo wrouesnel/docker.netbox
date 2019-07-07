@@ -1,0 +1,19 @@
+sudo: required
+services:
+  - docker
+before_install:
+  - curl -fsSL http://apt.dockerproject.org/gpg | sudo apt-key add -
+  - sudo add-apt-repository "deb https://apt.dockerproject.org/repo ubuntu-$(lsb_release -cs) main"
+  - sudo apt-get update
+  - sudo apt-get -y -o Dpkg::Options::="--force-confnew" install docker-engine
+script:
+  - export TAG=$TRAVIS_BUILD_NUMBER
+  - make all
+  - docker tag $(cat .dockerid) $DOCKER_IMAGE:$TAG
+after_success:
+  - |-
+    if [ $TRAVIS_PULL_REQUEST != "true" ]; then docker login -u $DOCKER_USER -p $DOCKER_PASS ; export TAG=`if [ "$TRAVIS_BRANCH" == "master" ]; then echo "latest"; else echo $TRAVIS_BRANCH ; fi` ;
+    docker tag $DOCKER_IMAGE:$TRAVIS_BUILD_NUMBER $DOCKER_IMAGE:$TAG ; if [ ! -z "$TRAVIS_TAG" ]; then docker tag $DOCKER_IMAGE:$TRAVIS_BUILD_NUMBER $DOCKER_IMAGE:$TRAVIS_TAG ; fi ; docker rmi $DOCKER_IMAGE:$TRAVIS_BUILD_NUMBER ; docker push $DOCKER_IMAGE ; fi
+env:
+  global:
+    - DOCKER_IMAGE=wrouesne/netbox

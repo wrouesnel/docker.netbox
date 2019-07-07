@@ -1,0 +1,9 @@
+#!/bin/sh
+
+[ ! -e /run/log/node-exporter ] && mkfifo /run/log/node-exporter
+
+exec node_exporter \
+    --web.listen-address=127.0.0.1:9100 \
+    --no-collector.timex \
+    --collector.runit \
+    --collector.runit.servicedir=/run/services 1> /run/log/node-exporter 2>&1

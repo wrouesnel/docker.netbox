@@ -1,0 +1,23 @@
+# Configuration file for repmgrd.conf
+# Adapted from the original work in PostDock.
+# Notable changes are that we are fixing a bunch of parameters which aren't
+# generally interesting to tune at the moment, and presuming repmgr v4.
+
+#event_notification_command='/usr/local/bin/cluster/repmgr/events/router.sh %n %e %s \"%t\" \"%d\"'
+#ssh_options=-o \"StrictHostKeyChecking no\" -v
+use_replication_slots=true
+pg_bindir=/usr/lib/postgresql/10/bin
+
+node_id={{REPMGR_NODE_ID}}
+node_name={{HOSTNAME}}
+
+conninfo='user=postgres password=$REPLICATION_PASSWORD dbname={{PSQL_DB}} sslmode=required sslcert=/run/psql-clientcert.crt sslkey=/run/psql-clientkey.pem port=5432 connect_timeout=10'
+
+#failover=automatic
+#promote_command='repmgr standby promote --log-level DEBUG --verbose'
+#follow_command='repmgr standby follow -W --log-level DEBUG --verbose'
+
+reconnect_attempts={{REPMGR_RECONNECT_ATTEMPTS}}
+reconnect_interval={{REPMGR_RECONNECT_INTERVAL}}
+log_level=info
+priority=100

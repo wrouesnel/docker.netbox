@@ -1,0 +1,12 @@
+#!/bin/bash
+
+#source /run/ralph-db-settings.env
+
+username="$1"
+password="$2"
+email="$3"
+
+expect -f /usr/local/bin/netbox-createsuperuser.expect "$username" "$password" "$email"
+
+exit $?
+

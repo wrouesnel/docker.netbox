@@ -1,0 +1,12 @@
+#!/bin/bash
+set -e
+[ ! -e /run/log/alertmanager ] && mkfifo /run/log/alertmanager
+source "$ALERTMANAGER_PEERS_FILE"
+exec /opt/alertmanager/alertmanager \
+    --config.file=/run/alertmanager.yml \
+    --storage.path=$ALERTMANAGER_DATA_DIRECTORY \
+    --web.listen-address="127.0.0.1:9094" \
+    --cluster.listen-address="$(localip):9094" \
+    --cluster.advertise-address="$(localip):9094" \
+    $CLUSTER_PEERS \
+    --web.external-url="https://$HOSTNAME/alerts" > /run/log/alertmanager 2>&1

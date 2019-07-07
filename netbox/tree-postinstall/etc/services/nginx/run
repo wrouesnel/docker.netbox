@@ -1,0 +1,8 @@
+#!/bin/sh
+
+# Setup logging fifos.
+[ ! -e /run/log/nginx-access ] && mkfifo /run/log/nginx-access
+[ ! -e /run/log/nginx-error ] && mkfifo /run/log/nginx-error
+[ ! -e /run/log/nginx ] && mkfifo /run/log/nginx
+
+exec nginx -c /run/nginx.conf -g "daemon off; error_log /run/log/nginx-error notice;" > /run/log/nginx 2>&1

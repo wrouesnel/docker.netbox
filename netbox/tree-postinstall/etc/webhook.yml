@@ -1,0 +1,64 @@
+---
+- id: netbox-migrate
+  execute-command: /usr/local/bin/netbox-migrate
+  include-command-output-in-response: true
+  command-working-directory: /tmp
+
+- id: netbox-createsuperuser
+  execute-command: /usr/local/bin/netbox-createsuperuser
+  include-command-output-in-response: true
+  command-working-directory: /tmp
+  pass-arguments-to-command:
+  - source: payload
+    name: username
+  - source: payload
+    name: password
+  - source: payload
+    name: email
+
+- id: binary-backup
+  execute-command: /usr/local/bin/binary-backup
+  command-working-directory: /tmp
+  stream-stdout-in-response: true
+  stream-stderr-in-response-on-error: true 
+  stream-command-kill-grace-period-seconds: 10
+  response-headers:
+  - name: Content-Type
+    value: application/x-tar
+
+- id: dump-data
+  execute-command: /usr/local/bin/dump-data
+  command-working-directory: /tmp
+  stream-stdout-in-response: true
+  stream-stderr-in-response-on-error: true 
+  stream-command-kill-grace-period-seconds: 10  
+  response-headers:
+  - name: Content-Type
+    value: application/json
+
+#- id: ldap_sync
+#  execute-command: /usr/local/bin/webhook-ralp-ldap-sync
+#  include-command-output-in-response: true
+#  command-working-directory: /tmp  
+#  
+#- id: migrate
+#  execute-command: /usr/local/bin/webhook-ralph-migrate
+#  include-command-output-in-response: true
+#  command-working-directory: /tmp
+#  
+#- id: sitetree_resync_apps
+#  execute-command: /usr/local/bin/webhook-ralph-sitetree_resync_apps
+#  include-command-output-in-response: true
+#  command-working-directory: /tmp
+
+#- id: createsuperuser
+#  execute-command: /usr/local/bin/webhook-ralph-createsuperuser
+#  pass-arguments-to-command:
+#  - source: payload
+#    name: username
+#  - source: payload
+#    name: password
+#  - source: payload
+#    name: email
+#  include-command-output-in-response: true
+#  command-working-directory: /tmp

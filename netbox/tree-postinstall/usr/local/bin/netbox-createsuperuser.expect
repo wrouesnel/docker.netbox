@@ -1,0 +1,30 @@
+#!/usr/bin/expect -f
+
+set username [lindex $argv 0];
+set password [lindex $argv 1];
+set email [lindex $argv 2];
+
+spawn python3 /opt/netbox/netbox/manage.py createsuperuser --email "$email" --username "$username"
+set timeout 5
+expect {
+    "Password:" { 
+        send "$password\r"
+        exp_continue
+    }
+    "Password (again):" { 
+        send "$password\r" 
+        exp_continue
+    }
+    "Superuser created successfully." {
+        puts "Superuser created successfully."
+        exit 0
+    }
+    timeout {
+        puts "Failed (prompt timeout)".
+        exit 1
+    }
+    eof {
+        puts "Unexpected EOF."
+        exit 1
+    }
+}

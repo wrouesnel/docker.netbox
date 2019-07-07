@@ -1,0 +1,153 @@
+---
+groups:
+# Generic status alerts
+- name: Status
+  rules:
+  # Alert for any instance that is unreachable for >5 minutes.
+  - alert: InstanceDown
+    expr: up == 0
+    for: 5m
+    labels:
+      severity: email
+    annotations:
+      summary: "Instance {{ $labels.instance }} down"
+      description: "{{ $labels.instance }} of job {{ $labels.job }} has been down for more than 5 minutes."
+
+  # Alert on instance restarts.
+  - alert: InstanceRestart
+    expr: resets(sys_uptime[10m]) > 0 and resets(sys_uptime[10m]) < 5
+    annotations:
+      description: '{{ $labels.instance }} for cluster {{ $labels.cluster }} restarted
+        {{ $value }} time(s) in 10m'
+      summary: "{{ $labels.instance }} has restarted"
+
+  # Alert on flapping instances (frequent restarts).
+  - alert: InstanceFlapping
+    expr: resets(sys_uptime[10m]) > 5
+    annotations:
+      description: '{{ $labels.instance }} for cluster {{ $labels.cluster }} restarted
+        {{ $value }} time(s) in 10m'
+      summary: Instance {{ $labels.instance }} flapping
+
+  # Alert for any instance that has a median request latency >1s.
+  - alert: APIHighRequestLatency
+    expr: api_http_request_latencies_second{quantile="0.5"} > 1
+    for: 10m
+    annotations:
+      summary: "High request latency on {{ $labels.instance }}"
+      description: "{{ $labels.instance }} has a median request latency above 1s (current value: {{ $value }}s)"
+
+  - alert: NearingFileDescriptorLimit
+    expr: process_max_fds * 0.5 <= process_open_fds
+    for: 1m
+    labels:
+      severity: email
+    annotations:
+      summary: "Open file descriptor use > 50% of limit."
+      description: "{{ $labels.instance }} has more then 50% of its file descriptor limit open (current value: {{ $value }}s)"
+
+- name: Storage
+  rules:
+  - alert: LowSpaceOnDataPartition
+    expr: node_filesystem_avail_bytes{mountpoint="/data"} < (1024*1024*1024)*2
+    labels:
+      severity: email
+    annotations:
+      summary: "/data partition on {{ $labels.instance }} has less then 2gb of free space"
+      description: "{{ $labels.instance }} is running out of free space and has less then 2gb free. Address this urgently!"      
+
+- name: Processes
+  rules:
+  - alert: Container process is down
+    expr: node_service_state{supervisor="runit"} == 0
+    for: 1m
+    labels:
+      severity: email
+    annotations:
+      summary: "{{ $labels.service }} on {{ $labels.instance }} is DOWN"
+      description: "{{ $labels.instance }} has an internal service ({{ $labels.service }}) that is reported down by its process supervisor. This is not normal and may represent a service which has started failing, or that manual intervention has left it down. Restarting the container is recommended."
+
+# rouesnwi: disabled for infrasot
+#- name: AlertManagers
+#  rules:
+#  - alert: AlertManagerInstanceNotHA
+#    expr: alertmanager_cluster_members <= 1
+#    for: 1m
+#    labels:
+#      severity: email
+#    annotations:
+#      summary: "AlertManager cluster with only 1 alertmanager"
+#      description: "{{ $labels.instance }} reports only 1 cluster member for its AlertManager. There may be a network problem for port 9094 amongst the cluster."
+
+- name: Postgres
+  rules:
+  - alert: PostgreSQLMaxConnectionsReached
+    expr: sum(pg_stat_activity_count) by (instance) > sum(pg_settings_max_connections) by (instance)
+    for: 1m
+    labels:
+      severity: email
+    annotations:
+      summary: "{{ $labels.instance }} has maxed out Postgres connections."
+      description: "{{ $labels.instance }} is exceeding the currently configured maximum Postgres connection limit (current value: {{ $value }}s). Services may be degraded - please take immediate action (you probably need to increase max_connections in the Docker image and re-deploy."
+
+  - alert: PostgreSQLHighConnections
+    expr: sum(pg_stat_activity_count) by (instance) > sum(pg_settings_max_connections * 0.8) by (instance)
+    for: 10m
+    labels:
+      severity: email
+    annotations:
+      summary: "{{ $labels.instance }} is over 80% of max Postgres connections."
+      description: "{{ $labels.instance }} is exceeding 80% of the currently configured maximum Postgres connection limit (current value: {{ $value }}s). Please check utilization graphs and confirm if this is normal service growth, abuse or an otherwise temporary condition or if new resources need to be provisioned (or the limits increased, which is mostly likely)."
+
+  - alert: PostgreSQLDown
+    expr: pg_up != 1
+    for: 1m
+    labels:
+      severity: email
+    annotations:
+      summary: "PostgreSQL is not processing queries: {{ $labels.instance }}"
+      description: "{{ $labels.instance }} is rejecting query requests from the exporter, and thus probably not allowing DNS requests to work either. User services should not be effected provided at least 1 node is still alive."
+
+- name: Nginx
+  rules:
+  - alert: Nginx500Errors
+    expr:  (sum_over_time(nginx_http_requests_total{status="500"}[1m]) + sum_over_time(nginx_http_requests_total{status="501"}[1m]) + sum_over_time(nginx_http_requests_total{status="502"}[1m]) + sum_over_time(nginx_http_requests_total{status="503"}[1m]) + sum_over_time(nginx_http_requests_total{status="504"}[1m])) > 0
+    labels:
+      severity: email
+    annotations:
+      summary: "DNS nginx server is returning 500 over the last minute: {{ $labels.instance }}"
+      description: "{{ $labels.instance }} has been returning some 500 errors to clients for the last minute for requests to {{ $labels.host }}. It may be unhealthy."
+      
+- name: Certificates
+  rules:
+  - alert: SSLCertificateExpiring
+    expr: ssl_cert_not_after - time() < (86400*60)
+    labels:
+      severity: info
+    annotations:
+      summary: "SSL certificate expires in <60 days for {{ $labels.service }} on {{ $labels.instance }}"
+      description: "{{ $labels.instance }} {{ $labels.service }} SSL certificate expires in less then 60 days."
+        
+  - alert: SSLCertificateExpiring
+    expr: ssl_cert_not_after - time() < (86400*30)
+    labels:
+      severity: warning
+    annotations:
+      summary: "SSL certificate expires in <30 days for {{ $labels.service }} on {{ $labels.instance }}"
+      description: "{{ $labels.instance }} {{ $labels.service }} SSL certificate expires in less then 30 days."  
+
+  - alert: SSLCertificateExpiring
+    expr: ssl_cert_not_after - time() < (86400*5)
+    labels:
+      severity: critical
+    annotations:
+      summary: "SSL certificate expires in <5 days for {{ $labels.service }} on {{ $labels.instance }}"
+      description: "{{ $labels.instance }} {{ $labels.service }} SSL certificate expires in less then 5 days."
+        
+  - alert: SSLCertificateExpired
+    expr: ssl_cert_not_after - time() < 0
+    labels:
+      severity: incident
+    annotations:
+      summary: "SSL certificate IS EXPIRED for {{ $labels.service }} on {{ $labels.instance }}"
+      description: "{{ $labels.instance }} {{ $labels.service }} has EXPIRED. It must be replaced urgently."

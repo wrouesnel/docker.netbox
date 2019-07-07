@@ -1,0 +1,6 @@
+#!/bin/sh
+
+[ ! -e /run/log/postgres ] && mkfifo /run/log/postgres
+
+BIN=$(which postgres)
+exec sudo -u postgres $BIN -D /etc/postgresql/10/main > /run/log/postgres 2>&1

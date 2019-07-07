@@ -1,0 +1,220 @@
+user www-data;
+worker_processes auto;
+pid /run/nginx.pid;
+include /etc/nginx/modules-enabled/*.conf;
+error_log /run/log/nginx-error notice;
+
+events {
+	worker_connections 768;
+	# multi_accept on;
+}
+
+http {
+
+	##
+	# Basic Settings
+	##
+
+	sendfile on;
+	tcp_nopush on;
+	tcp_nodelay on;
+	keepalive_timeout 65;
+	types_hash_max_size 2048;
+	server_tokens on;
+
+	# server_names_hash_bucket_size 64;
+	server_name_in_redirect on;
+
+	include /etc/nginx/mime.types;
+	default_type application/octet-stream;
+
+	##
+	# SSL Settings
+	##
+
+    # Mozilla recommended MODERN cipersuites sans TLSv1.1
+    # https://wiki.mozilla.org/Security/Server_Side_TLS
+	ssl_protocols TLSv1.2;
+	ssl_ciphers ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA384:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA256;
+	ssl_prefer_server_ciphers on;
+
+	##
+	# Logging Settings
+	##
+
+    # This redirects all data to FIFOs which are created in advance.
+    # nginx is the only one which needs to do this.
+	access_log /run/log/nginx-access combined;
+
+	##
+	# Gzip Settings
+	##
+
+	gzip off;
+	gzip_disable "msie6";
+
+    proxy_buffering off;
+    proxy_cache off;
+
+    proxy_temp_path {{DATA_DIR}}/nginx/proxy 1 2;    
+    proxy_cache_path {{DATA_DIR}}/nginx/cache levels=1:2 keys_zone=one:10m;
+    client_body_temp_path {{DATA_DIR}}/nginx/body 1 2;
+    fastcgi_temp_path {{DATA_DIR}}/nginx/fastcgi 1 2;
+    scgi_temp_path {{DATA_DIR}}/nginx/scgi 1 2;
+    uwsgi_temp_path {{DATA_DIR}}/nginx/uwsgi 1 2;
+
+    ##
+    # Prometheus Metrics via Lua
+    ##
+    # Use lua to provide enhanced prometheus metrics for the virtual hosts
+    lua_shared_dict prometheus_metrics 10M;
+    lua_package_path "/usr/share/nginx/lua/?.lua";
+    init_by_lua '
+      prometheus = require("prometheus").init("prometheus_metrics")
+      metric_requests = prometheus:counter(
+        "nginx_http_requests_total", "Number of HTTP requests", {"host", "status"})
+      metric_latency = prometheus:histogram(
+        "nginx_http_request_duration_seconds", "HTTP request latency", {"host"})
+      metric_connections = prometheus:gauge(
+        "nginx_http_connections", "Number of HTTP connections", {"state"})
+    ';
+    log_by_lua '
+      local host = ngx.var.host:gsub("^www.", "")
+      metric_requests:inc(1, {host, ngx.var.status})
+      metric_latency:observe(tonumber(ngx.var.request_time), {host})
+    ';
+
+    ## 
+    # Server configuration
+    ##
+    
+    server {
+        listen 561 ssl default_server;
+
+        ssl_certificate     /run/nginx-cert.crt;
+        ssl_certificate_key /run/nginx-key.pem;
+    
+        add_header Cache-Control no-cache;
+        
+        # Metric Endpoints
+        location /metrics {
+            proxy_pass http://127.0.0.1:9998/metrics;
+            access_log   off;
+        }
+        
+        location / {
+            return 404;
+        }
+    }
+    
+    server {
+        listen 443 ssl default_server;
+
+        ssl_certificate     /run/nginx-cert.crt;
+        ssl_certificate_key /run/nginx-key.pem;
+    
+        add_header Cache-Control no-cache;
+        
+        # Info Endpoints - expose internal, operationally relevant runtime
+        # configuration.
+        location /info/ {
+            root /usr/share/nginx/html;
+            autoindex on;
+            default_type text/plain;
+        }
+        
+        # Prometheus
+        location /monitoring {
+            proxy_pass http://127.0.0.1:9090;
+            
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;  
+        }
+
+        location /container/api/ {
+            {% if ADMIN_AUTH != "n" %}
+            auth_basic "Container API Hooks";
+            auth_basic_user_file {{admin_htpasswd}};
+            {% endif %}
+        
+            proxy_pass http://127.0.0.1:9000/hooks/;
+
+            proxy_set_header Host $http_host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # Alertmanager (password protected)
+        location /alerts {
+            {% if ADMIN_AUTH != "n" %}
+            auth_basic "Alertmanager Access Restricted";
+            auth_basic_user_file {{admin_htpasswd}};
+            {% endif %}
+            proxy_pass http://127.0.0.1:9094;
+        
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;  
+        }
+    
+        # Netbox static files.    
+        location /static/ {
+            alias {{DATA_DIR}}/netbox/static/;
+        }
+    
+        # Netbox application
+        location / {
+            uwsgi_pass uwsgi://127.0.0.1:8001;
+
+            uwsgi_pass_header HTTP_AUTHORIZATION;
+            uwsgi_pass_header Authorization;
+            uwsgi_pass_request_headers on;
+
+            include /etc/nginx/uwsgi_params;
+            
+            proxy_set_header X-Forwarded-Host $server_name;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+
+            add_header P3P 'CP="ALL DSP COR PSAa PSDa OUR NOR ONL UNI COM NAV"';
+        }
+    }
+    
+    # Add a redirect for port 80.
+    server {
+        listen  80 default_server;
+        
+        # This stub is used by the Prometheus exporter.
+        location /nginx_status {
+          stub_status on;
+          access_log   off;
+          allow 127.0.0.1;
+          deny all;
+        }
+        
+        # This stub is used by the Lua metrics.
+        location /lua_metrics {
+            access_log off;
+            allow 127.0.0.1;
+            deny all;
+            content_by_lua '
+              metric_connections:set(ngx.var.connections_reading, {"reading"})
+              metric_connections:set(ngx.var.connections_waiting, {"waiting"})
+              metric_connections:set(ngx.var.connections_writing, {"writing"})
+              prometheus:collect()
+            ';
+        }
+
+        # Helper redirect for metrics.
+        location /metrics {
+            return 301 https://$host:561$request_uri;
+        }
+
+        location / {
+            return 301 https://$server_name$request_uri;
+        }
+    }
+}

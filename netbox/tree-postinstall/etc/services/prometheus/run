@@ -1,0 +1,12 @@
+#!/bin/sh
+# Note the use of storage.tsdb.no-lockfile - this was found to cause issues in Docker
+# deployments.
+[ ! -e /run/log/prometheus ] && mkfifo /run/log/prometheus
+exec /opt/prometheus/prometheus \
+    --config.file=/run/prometheus.yml \
+    --storage.tsdb.path=$PROMETHEUS_DATA_DIRECTORY \
+    --storage.tsdb.no-lockfile \
+    --web.console.templates=/opt/prometheus/consoles \
+    --web.console.libraries=/opt/prometheus/console_libraries \
+    --web.listen-address="127.0.0.1:9090" \
+    --web.external-url="https://$HOSTNAME/monitoring" > /run/log/prometheus 2>&1

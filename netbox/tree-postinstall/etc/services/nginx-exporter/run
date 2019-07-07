@@ -1,0 +1,5 @@
+#!/bin/sh
+
+[ ! -e /run/log/nginx-exporter ] && mkfifo /run/log/nginx-exporter
+
+exec nginx_exporter -telemetry.address=127.0.0.1:9113 -nginx.scrape_uri=http://localhost/nginx_status 1> /run/log/nginx-exporter 2>&1

@@ -1,0 +1,626 @@
+#!/bin/bash
+
+# Ensure a private umask since we do a lot of SSL handling.
+umask 077
+
+function log() {
+    echo "$@"
+}
+
+function warn() {
+    echo "$@" > /run/log/init.warning
+}
+
+function fatal() {
+    echo "$@" 1>&2
+    if [ ! -z $INIT_PID ]; then
+        kill -TERM $INIT_PID
+    fi
+    exit 1
+}
+
+function genpassword() {
+    echo $(pwgen 48 1)
+}
+
+function stdbool() {
+    if [ -z "$1" ] ; then
+        echo "n"
+    else
+        echo ${1:0:1} | tr [A-Z] [a-z]
+    fi
+}
+
+# Reads the given environment variable name, detects if its a file and templates
+# it out to the given output file path. Optionally allows the process to be skipped
+# if the value is blank.
+# Usage: handle_file_input_envvar <options> ENVVAR OUTFILE
+# Valid options: --can-disable --allow-blank --append
+function handle_file_input_envvar() {
+    local can_disable allow_blank do_append
+
+    while true; do
+        case $1 in
+        --can-disable) can_disable=y ; shift ;;
+        --allow-blank) allow_blank=y ; shift ;;
+        --append) do_append=y ; shift ;;
+        *)
+            if [ "${1:0:2}" != "--" ] ; then
+                break
+            else  
+                fatal "handle_file_input_envvar: Unknown option received: $1"
+            fi
+            ;;
+        esac
+    done
+
+    local envvar="$1"
+    local outfile="$2"
+    
+    # Sanity checks
+    if [ "$#" -ne 2 ] ; then
+        log "handle_file_input_envvar: Got $# arguments, expected 2."
+        exit 1
+    fi
+    
+    eval local envval="\$$envvar"
+
+    if [ "${can_disable}" = "y" ] && [ "${envval}" = "disabled" ] ; then
+        log "$envvar disabled by user requested."
+        return
+    elif [ "${envval}" = "disabled" ] ; then
+        fatal "$envvar is set to \"disabled\" but this value is mandatory."
+        exit 1
+    fi
+    
+    if [ -z "${envval}" ] && [ "y" != "${allow_blank}" ]; then
+        fatal "$envvar is blank instead of being explicitly disabled and must contain a value."
+    fi
+    
+    if [ "${envval:0:1}" = "/" ] ; then
+        log "$envvar is path."
+        if [ ! -e "$envval" ] ; then
+            fatal "$envval does not exist."
+        fi
+        
+        if [ "$do_append" = "y" ] ; then
+            cat "$envval" >> "$outfile"
+        else
+            cat "$envval" > "$outfile"
+        fi
+    else
+        log "$envvar is literal."
+
+        if [ "$do_append" = "y" ] ; then
+            echo -n "$envval" >> "$outfile"
+        else
+            echo -n "$envval" > "$outfile"
+        fi
+    fi
+}
+
+function generate_or_load_password() {
+    local varname=$1
+    
+    local gencmd=genpassword
+    if [ ! -z "$2" ]; then
+        local gencmd="$2"
+    fi
+    
+    local varfile="${DATA_DIR}/$(echo $varname | tr [A-Z] [a-z]).secret"
+    eval local varval="\$$varname"
+
+    if [ -z "$varval" ]; then
+        if [ ! -e "$varfile" ]; then
+            log "Generating secret for $varname"
+            varval=$($gencmd)
+            echo -n "$varval" > "$varfile"
+            eval export $varname="$varval"
+        else
+            log "Loaded secret for $varname from $varfile"
+            local varval="$(cat $varfile)"
+            eval export $varname="$varval"
+        fi
+    else
+        log "$varname is not empty. Using provided value."
+        eval export $varname
+    fi
+}
+
+function own_if_exists() {
+    local ownerspec="$1"
+    local fname="$2"
+
+    if [ -z "$ownerspec" ]; then
+        fatal "own_if_exists: must specify file ownership of the form user:group or user:"
+    fi
+
+    if [ -z "$fname" ]; then
+        fatal "own_if_exists: must specify a filename as positional argument 2"
+    fi
+
+    if [ -e "${fname}" ]; then
+        chown $ownerspec "$fname" || fatal "Could not set ownership $ownerspec on file which exists $fname"
+    fi
+    return
+}
+
+# given a directory of files, template with filename to a target directory
+function template_directory() {
+    local src_dir="$1"
+    local tgt_dir="$2"
+
+    mkdir -p "$tgt_dir" || fatal "Could not create target directory for template_directory: $tgt_dir"
+    for templ in $(find "$src_dir" -mindepth 1 -maxdepth 1) ; do
+        p2 -t "$templ" -o "${tgt_dir}/$(basename "$templ")" || fatal "Templating $templ to $tgt_dir"
+    done
+}
+
+if [ "$(stdbool $DEV_ENTRYPOINT_DEBUG)" = "y" ]; then
+    set -x
+fi
+
+export PATH=/usr/lib/postgresql/10/bin:$PATH
+
+if [ -z $HOSTNAME ] ; then
+    HOSTNAME=$(hostname -f)
+fi
+export HOSTNAME
+
+if [ -z "$WEBUI_DNS_NAME" ] ; then
+    WEBUI_DNS_NAME="$HOSTNAME"
+fi
+export WEBUI_DNS_NAME
+
+# Check DATA_DIR exists and is /data
+if [ "$DATA_DIR" != "/data" ]; then
+    fatal "You have overridden DATA_DIR to not be /data. This is not supported. Please instead mount a data directory here."
+fi
+
+if [ "$PG_RUN_DIR" != "/run/postgresql" ]; then
+    fatal "You have overridden PG_RUN_DIR to not be /run/postgresql. This is not supported."
+fi
+
+# Early check DATA_DIR is a mountpoint
+if ! mountpoint "$DATA_DIR" > /dev/null 2>&1 && [ "$(stdbool "$DEV_ALLOW_EPHEMERAL_DATA")" != "y" ] ; then
+    fatal "$DATA_DIR is not a mountpoint. Data will not persist, and this is not allowed."
+elif ! mountpoint "$DATA_DIR" > /dev/null 2>&1 ; then
+    #warn "WARNING: allowing an ephemeral data directory."
+    mkdir -p "$DATA_DIR" || fatal "Could not create $DATA_DIR as the data directory"
+    chmod -R 755 "$DATA_DIR" || fatal "Could not set permissions on $DATA_DIR as the data directory"
+fi
+
+chmod 755 $DATA_DIR
+
+export NETBOX_DATA_DIR=$DATA_DIR/netbox
+export PG_DATA_DIRECTORY=$DATA_DIR/postgresql
+
+export PROMETHEUS_DATA_DIRECTORY=$DATA_DIR/prometheus
+export PROMETHEUS_TARGETS_DIRECTORY="/run/prometheus"
+export ALERTMANAGER_PEERS_FILE="/run/alertmanager_peers.env"
+touch $ALERTMANAGER_PEERS_FILE
+export ALERTMANAGER_DATA_DIRECTORY=$DATA_DIR/alertmanager
+export DATA_TMP_DIR="$DATA_DIR/tmp"
+
+# Make the data tmp dir if needed
+mkdir -p "$DATA_TMP_DIR" || fatal "Could not make data temporary directory"
+chmod 755 "$DATA_TMP_DIR" || fatal "Could not set ownership on data temporary directory"
+
+# Initial syslog configuration
+export SERVICES="init init.warning"
+
+# Create the log directory
+mkdir /run/log
+chmod 755 /run/log
+mkfifo /run/log/init
+mkfifo /run/log/init.warning
+
+p2 -t /etc/syslog-ng.conf.p2 -o /run/syslog-ng.conf || ( fatal "Templating syslog-ng config failed." )
+chmod 644 /run/syslog-ng.conf
+
+# Start syslog-ng as early as possible so we can log with it.
+mkdir "${SVDIR}"
+cp -af /etc/services/syslog-ng "${SVDIR}/syslog-ng"
+runsvdir "${SVDIR}" &
+export INIT_PID=$!
+trap "kill -TERM "$INIT_PID" 2> /dev/null" INT TERM EXIT
+
+export admin_htpasswd="${DATA_DIR}/admin.htpasswd"
+
+# Subshell the remainder of the script so it starts up properly
+
+(
+set -e
+
+log "Starting up with hostname: $HOSTNAME"
+log "Using DNS name: $WEBUI_DNS_NAME"
+
+# Create SSL configuration directory
+mkdir -p /run/ssl
+chmod 0755 /run/ssl
+mkdir -p /run/ca-certificates
+chmod 0755 /run/ca-certificates
+if [ -z "$PLATFORM_TLS_TRUST_CERTIFICATES" ]; then
+    if [ "$(stdbool "$DEV_ALLOW_DEFAULT_TRUST")" = "y" ]; then
+        # Allowing defaults
+        cp -a /etc/ssl.default/. /run/ssl/
+        cp -a /usr/local/share/ca-certificates.default/. /run/ca-certificates/
+        cp -f  /etc/ca-certificates.conf.default /run/ca-certificates.conf
+        update-ca-certificates || fatal "Installing platform trust TLS certificates failed."
+    else
+        fatal "PLATFORM_TLS_TRUST_CERTIFICATES is blank but DEV_ALLOW_DEFAULT_TRUST is not set to yes."
+    fi
+else
+    # Generate the directory structure manually
+    mkdir -p /run/ssl/certs /run/ssl/private
+    chmod 0755 /run/ssl/certs
+    chmod 0750 /run/ssl/private
+    chown root:ssl-cert /run/ssl/private
+    cp -f /etc/ssl.default/openssl.cnf /run/ssl/
+    # Set a blank default certs path
+    touch /run/ca-certificates.conf
+    
+    # To make debugging easier, support a file path in PLATFORM_TLS_TRUST_CERTIFICATES
+    handle_file_input_envvar         --allow-blank       PLATFORM_TLS_TRUST_CERTIFICATES         /run/platform-ca-certs.crt
+    
+    ( cd /run/ca-certificates && \
+        awk 'BEGIN {c=0;} /BEGIN CERT/{c++} { print > "cert." c ".crt"}' < /run/platform-ca-certs.crt )
+
+    update-ca-certificates || fatal "Installing platform trust TLS certificates failed."
+fi
+
+if [ -z "$PSQL_DB" ] ; then
+    export PSQL_DB="${PSQL_USER}_db"
+fi
+
+# Sanity check environment which has defaults
+[ -z "$PSQL_USER" ] && fatal "PSQL_USER cannot be blank (did you override the default?)"
+[ -z "$PSQL_DB" ] && fatal "PSQL_DB cannot be blank (did you override the default?)"
+
+generate_or_load_password PSQL_PASSWORD
+
+# Force users to mark they want no alert email addresses.
+if [ -z "$ALERT_EMAIL_ADDRESSES" ] ; then
+    if [ "$(stdbool ${DEV_NO_ALERT_EMAILS})" != "y" ]; then
+        fatal "ALERT_EMAIL_ADDRESSES cannot be blank."
+    fi
+fi 
+
+if [ -z "$SMTP_SMARTHOST" ] ; then
+    if [ "$(stdbool ${DEV_NO_SMARTHOST})" != "y" ]; then
+        fatal "SMTP_SMARTHOST cannot be blank."
+    fi
+fi 
+
+if [ -z "$SMTP_FROM" ]; then
+    export SMTP_FROM="alertmanager@${HOSTNAME}"template
+fi
+
+# Logging isn't available till we get to here anyway.
+if [ -z "$PLATFORM_TLS_TRUST_CERTIFICATES" ]; then
+    warn "No TLS trust certificates specified. Default certificates will be used."
+else
+    log "Platform trust certificates specified."  
+fi
+
+export ADMIN_AUTH=$(stdbool "$ADMIN_AUTH")
+
+if [ "$ADMIN_AUTH" = "y" ]; then
+    if [ -z "$ADMIN_USER" ] ; then
+        fatal "No ADMIN_USER specified. This is required for the time being."
+    fi
+
+    if [ -z "$ADMIN_PASSWORD" ] ; then
+        fatal "No ADMIN_PASSWORD specified. This is required for the time being."
+    fi
+
+    # Force update the htpasswd file with the correct credentials
+    log "Force updating: $admin_htpasswd"
+    echo "$ADMIN_PASSWORD" | htpasswd -ci "$admin_htpasswd" "$ADMIN_USER"
+    if [ $? != 0 ] ; then
+        fatal "Error creating htpasswd file for API access."
+    fi
+    chown root:www-data "$admin_htpasswd"
+    chmod 640 "$admin_htpasswd"
+else
+    warn "WARNING: ADMIN API authentication is DISABLED"
+fi
+
+if [ "$(stdbool ${DEV_STANDALONE})" = "y" ]; then
+    warn "WARNING: STANDALONE MODE ACTIVATED."
+    log "Generating self-signed certificates for Postgres server."
+    
+    if [ -z "${PSQL_SSL_SERVER_CERT}" ] || [ -z "${PSQL_SSL_SERVER_KEY}" ] ; then
+        log "PSQL_SSL_SERVER_CERT or PSQL_SSL_SERVER_KEY not specified and in standalone mode. Generating self-signed certificate for both."
+    
+        # Use a subshell for the generation    
+        (
+            cd /run
+            makecerts --CN=$HOSTNAME --emails=generated@$HOSTNAME  --name-suffix=psql-generated \
+                server=${HOSTNAME},$(localip),localhost,127.0.0.1
+                #/run/psql-client-generated=postgres,${HOSTNAME},$(localip),localhost,127.0.0.1
+        
+        ) || fatal "Self-signed certificate generation failed."
+        
+        export PSQL_SSL_SERVER_CERTCHAIN=""
+        export PSQL_SSL_SERVER_CERT=/run/server.psql-generated.crt
+        export PSQL_SSL_SERVER_KEY=/run/server.psql-generated.pem
+    fi
+    
+    if [ "${PSQL_SSL_CLIENT_CACERT}" != "disabled" ] && [ -z "${PSQL_SSL_CLIENT_CACERT}" ] ; then
+        warn "WARNING: STANDALONE MODE - generating PSQL_SSL_CLIENT_CERT and PSQL_SSL_CLIENT_KEY and forcing PSQL_SSL_CLIENT_CACERT to trust it due to blank PSQL_SSL_CLIENT_CACERT"
+
+        # Use a subshell for the generation    
+        (
+            cd /run
+            makecerts --CN=$HOSTNAME --emails=generated@$HOSTNAME --name-suffix=psql-generated \
+                --load-ca-cert="/run/${HOSTNAME}.psql-generated.crt" \
+                --load-ca-key="/run/${HOSTNAME}.psql-generated.pem" \
+                client=postgres,${HOSTNAME},$(localip),localhost,127.0.0.1
+        
+        ) || fatal "Self-signed certificate generation failed."
+
+        export PSQL_SSL_CLIENT_CACERT="/run/${HOSTNAME}.psql-generated.crt"
+    	export PSQL_SSL_CLIENT_CERT="/run/client.psql-generated.crt"
+	    export PSQL_SSL_CLIENT_KEY="/run/client.psql-generated.pem"
+    fi
+
+fi
+
+if [ -z "${WEBUI_SSL_SERVER_CERT}" ] && [ -z "${WEBUI_SSL_SERVER_KEY}" ] ; then
+    if [ "$(stdbool $DEV_ALLOW_SELF_SIGNED)" != "y" ] ; then
+        fatal "WEBUI_SSL_SERVER_CERT and WEBUI_SSL_SERVER_KEY are blank but self-signed certificates are not allowed."    
+    fi
+    
+    log "WEBUI_SSL_SERVER_CERT and WEBUI_SSL_SERVER_KEY are blank. Generating self-signed certificate."
+    WEBUI_SSL_SERVER_CERTCHAIN=""
+
+    export WEBUI_SSL_SERVER_CERT=/run/webui-generated.crt
+    export WEBUI_SSL_SERVER_KEY=/run/webui-generated.pem
+
+    openssl req -x509 -newkey rsa:4096 \
+        -keyout $WEBUI_SSL_SERVER_KEY \
+        -out $WEBUI_SSL_SERVER_CERT \
+        -days 3065 -nodes \
+        -subj "/CN=$HOSTNAME"
+    if [ $? != 0 ]; then
+        fatal "Self-signed certificate generation failed."
+    fi
+fi
+
+if [ -z "${WEBUI_SSL_SERVER_CERT}" ] ; then
+    fatal "SSL_SERVER_CERT is blank but other SSL fields are not. This is invalid."
+fi
+
+if [ -z "${WEBUI_SSL_SERVER_KEY}" ] ; then
+    fatal "SSL_SERVER_KEY is blank but other SSL fields are not. This is invalid."
+fi
+
+handle_file_input_envvar                WEBUI_SSL_SERVER_CERT    /run/nginx-cert.crt
+handle_file_input_envvar --append --allow-blank WEBUI_SSL_SERVER_CERT      /run/nginx-cert.crt
+handle_file_input_envvar                WEBUI_SSL_SERVER_KEY     /run/nginx-key.pem
+
+handle_file_input_envvar                PSQL_SSL_SERVER_CERT    /run/psql-cert.crt
+handle_file_input_envvar --append --allow-blank PSQL_SSL_SERVER_CERTCHAIN      /run/psql-cert.crt
+handle_file_input_envvar                PSQL_SSL_SERVER_KEY     /run/psql-key.pem
+
+handle_file_input_envvar --can-disable  PSQL_SSL_CLIENT_CACERT  /run/psql-clientca.crt
+handle_file_input_envvar --can-disable  PSQL_SSL_CLIENT_CERT    /run/psql-clientcert.crt
+handle_file_input_envvar --can-disable  PSQL_SSL_CLIENT_KEY     /run/psql-clientkey.pem
+
+own_if_exists  postgres: /run/psql-cert.crt
+own_if_exists  postgres: /run/psql-key.pem
+own_if_exists  postgres: /run/psql-clientca.crt
+own_if_exists  postgres: /run/psql-clientcert.crt
+own_if_exists  postgres: /run/psql-clientkey.pem
+
+log "Templating postgresql configuration..."
+template_directory "/templates/postgresql/main.templ.p2" "$PG_RUN_DIR/conf"
+chmod 644 "$PG_RUN_DIR"/conf/* || fatal "Could not set permissions."
+chmod 755 "$PG_RUN_DIR" || fatal "Could not set permissions."
+chmod 755 "$PG_RUN_DIR/conf" || fatal "Could not set permissions."
+chown -R root:postgres "$PG_RUN_DIR" || fatal "Could not set ownership"
+
+# Set the join flag to the initial nodes
+if [ "$(stdbool ${DEV_STANDALONE})" = "n" ]; then
+    log "Initial cluster nodes set"
+
+    ALERTMANAGER_CLUSTER_PEERS=""
+    #for peer in $(echo "${COCKROACHDB_INITIAL_NODES}" | tr -s ',' ' ') ; do
+    #peerhost="$(echo $peer | cut -d':' -f1)"
+    peerhost=$(localip)
+    ALERTMANAGER_CLUSTER_PEERS="$ALERTMANAGER_CLUSTER_PEERS --cluster.peer=${peerhost}:9094"
+    log "Added $peerhost as an alertmanager cluster peer"
+    #done
+    ## Write out the cluster peers env file
+    log "Wrote cluster peers file for alertmanager..."
+    echo "export CLUSTER_PEERS=\"$ALERTMANAGER_CLUSTER_PEERS\"" > "$ALERTMANAGER_PEERS_FILE"
+    
+    mkdir -p /run/prometheus
+    
+    # Also write a prometheus alertmanager targets config
+    echo "${peerhost}" | tr -s ',' '\n' | cut -d':' -f1 | sed 's/$/:9094/g' | jq -nR '[ { "targets" : [inputs] } ]' > /run/prometheus_targets.json
+    log "Wrote Prometheus alertmanager dispatch config."
+    echo "${peerhost}" | tr -s ',' '\n' | cut -d':' -f1 | sed 's/$/:561/g' | jq -nR '[ { "targets" : [inputs] } ]' > /run/prometheus/targets.json
+    log "Wrote Prometheus monitoring config."
+    
+else
+    warn "STANDALONE MODE - not setting up a CockroachDB cluster."
+fi
+
+log "Templating nginx configuration..."
+p2 -t /etc/nginx/nginx.conf.p2 -o /run/nginx.conf || ( fatal "Templating nginx config failed." )
+chmod 644 /run/nginx.conf
+
+log "Templating syslog-ng configuration..."
+export SERVICES="$(ls -1 /etc/services | tr '\n' ' ')nginx-access nginx-error init init.warning"
+p2 -t /etc/syslog-ng.conf.p2 -o /run/syslog-ng.conf || ( fatal "Templating syslog-ng config failed." )
+chmod 644 /run/syslog-ng.conf
+
+log "Ensuring $PROMETHEUS_DATA_DIRECTORY exists..."
+mkdir -m 755 -p "$PROMETHEUS_DATA_DIRECTORY"
+mkdir -m 755 -p "$PROMETHEUS_TARGETS_DIRECTORY"
+
+log "Templating Prometheus configuration..."
+p2 -t /etc/prometheus.yml.p2 -o /run/prometheus.yml
+
+log "Ensuring $ALERTMANAGER_DATA_DIRECTORY exists..."
+mkdir -m 755 -p "$ALERTMANAGER_DATA_DIRECTORY"
+
+log "Templating alertmanager configuration..."
+p2 -t /etc/alertmanager.yml.p2 -o /run/alertmanager.yml
+
+log "Templating postgres_exporter configuration..."
+p2 -t /etc/postgres_exporter.queries.yml.p2 -o /run/postgres_exporter.queries.yml
+
+log "Checking postgres database status..."
+
+log "Ensuring $PG_DATA_DIRECTORY exists"
+mkdir -m 755 -p "$PG_DATA_DIRECTORY"
+
+log "Checking permissions..."
+chmod 700 "$PG_DATA_DIRECTORY"
+chown -R postgres "$PG_DATA_DIRECTORY"
+
+log "Creating runtime directories for postgres..."
+mkdir -m 755 -p /run/postgresql/10-main.pg_stat_tmp
+# TODO: this doesn't work with pdns
+chmod g+s /run/postgresql
+chmod o+x /run/postgresql
+chown -R postgres /run/postgresql
+
+if [ ! -s "$PG_DATA_DIRECTORY/PG_VERSION" ]; then
+    log "Database is uninitialized. Initializing a new DB."
+    sudo -u postgres $(which initdb) -D "$PG_DATA_DIRECTORY" --encoding=UTF8
+    if [ $? != 0 ] ; then
+	    fatal "Error initializing database under $PG_DATA_DIRECTORY"
+	fi
+	
+	log "Removing initdb generated config files (will use built-in image config)"
+	rm -f $PG_DATA_DIRECTORY/postgresql.auto.conf \
+	    $PG_DATA_DIRECTORY/postgresql.conf \
+	    $PG_DATA_DIRECTORY/pg_hba.conf \
+	    $PG_DATA_DIRECTORY/pg_ident.conf
+	
+    # internal start of server in order to allow set-up using psql-client		
+    # does not listen on external TCP/IP and waits until start finishes
+    sudo -u postgres $(which pg_ctl) -D "/etc/postgresql/10/main" \
+        -o "-c listen_addresses='localhost'" \
+        -w start
+    psql=( "$(which psql)" -v "ON_ERROR_STOP=1" )
+    
+#    log "Setting up BDR extensions in template1"
+#    "${psql[@]}" --username postgres --dbname template1  <<-EOSQL
+#CREATE EXTENSION btree_gist ;
+#CREATE EXTENSION bdr ;
+#EOSQL
+#	if [ $? != 0 ] ; then
+#	    fatal "Error while setting up PowerDNS template1 database with BDR extensions"
+#	fi
+	 
+    log "Creating new user: $PSQL_USER and database: $PSQL_DB"
+
+    "${psql[@]}" --username postgres <<-EOSQL
+CREATE USER "$PSQL_USER" WITH ENCRYPTED PASSWORD '$PSQL_PASSWORD' ; 
+CREATE DATABASE "$PSQL_DB" OWNER "$PSQL_USER" ;
+EOSQL
+	if [ $? != 0 ] ; then
+	    fatal "Error while setting up database $PSQL_DB and user $PSQL_USER"
+	fi
+	
+#    log "Initializing PowerDNS database schema"
+#	psql+=( --username "$POWERDNS_DB_USER" --dbname "$POWERDNS_DB_NAME" )
+#	${psql[@]} < /usr/share/doc/pdns-backend-pgsql/schema.pgsql.sql
+#	if [ $? != 0 ] ; then
+#	    echoerr "Error while setting up PowerDNS schema in $POWERDNS_DB_NAME"
+#	    exit 1
+#	fi
+#	log "PowerDNS initialization complete."
+	
+	# TODO: Save passwords to the data mount.
+	if ! sudo -u postgres $(which pg_ctl) -D "/etc/postgresql/10/main" -m fast -w stop ; then
+	    fatal "Error while shutting down postgres after initialization."
+	fi
+fi
+
+# Ensure a web secret for netbox exists
+if [ -z "$NETBOX_WEB_SECRET" ]; then
+    log "Preparing web secret for netbox..."
+    generate_or_load_password NETBOX_WEB_SECRET
+else
+    log "Using provided web secret for netbox..."
+    export NETBOX_WEB_SECRET
+fi
+
+log "Creating runtime directories..."
+mkdir -m 755 -p /run/postgresql/10-main.pg_stat_tmp
+chmod g+s /run/postgresql
+chmod o+x /run/postgresql
+chown -R postgres /run/postgresql
+
+# Netbox Templating
+
+export DEV_NETBOX_DEBUG=$(stdbool "$DEV_NETBOX_DEBUG")
+
+export NETBOX_LDAP_AUTH=$(stdbool "$NETBOX_LDAP_AUTH")
+
+log "Templating netbox configuration..."
+mkdir -p $NETBOX_RUN_DIR
+chown netbox: $NETBOX_RUN_DIR
+p2 -t /templates/netbox/configuration.py.p2 -o $NETBOX_RUN_DIR/configuration.py
+p2 -t /templates/netbox/ldap_config.py.p2 -o $NETBOX_RUN_DIR/ldap_config.py
+chown root:netbox $NETBOX_RUN_DIR/configuration.py $NETBOX_RUN_DIR/ldap_config.py
+chmod 0644 $NETBOX_RUN_DIR/configuration.py $NETBOX_RUN_DIR/ldap_config.py
+
+log "Ensure data dir permissions..."
+mkdir -p "$NETBOX_DATA_DIR"/{media,reports,static}
+chmod 0711 "$NETBOX_DATA_DIR"
+chmod 0711 "$NETBOX_DATA_DIR"/{media,reports,static}
+
+log "Collecting static files for netbox..."
+( cd /opt/netbox/netbox && python3 manage.py collectstatic --no-input ) || \
+    fatal "Failed to collect static files for Netbox."
+
+chown -R netbox:www-data "$NETBOX_DATA_DIR"
+chmod -R g+rwx "$NETBOX_DATA_DIR"/{media,static}
+
+log "Create logging fifo directory"
+mkdir -p /run/log
+
+log "Create nginx cache directories"
+mkdir -p "$DATA_DIR/nginx"
+chown root:www-data "$DATA_DIR/nginx"
+chmod 770 "$DATA_DIR/nginx"
+
+nginx_dirs=( proxy cache body fastcgi scgi uwsgi )
+for nginx_dir in "${nginx_dirs[@]}" ; do
+    mkdir -p "$DATA_DIR/nginx/$nginx_dir"
+    chown root:www-data "$DATA_DIR/nginx/$nginx_dir"
+    chmod 770 "$DATA_DIR/nginx/$nginx_dir"
+done
+
+log "Start all services now"
+cp -af /etc/services /run
+sv restart syslog-ng
+
+) > /run/log/init 2>&1
+
+if [ $? -ne 0 ]; then
+    warn "Initialization stanza exited non-zero. Container aborting."
+    exit $?
+fi
+
+# This allows running a custom command in the context of the startup, but
+# forces the container to exit after it happens to avoid accidentally contaminating
+# production environments.
+if [ $# -ne 0 ]; then
+    (
+    log "Executing custom command"
+    "$@"
+    ) > /run/log/init 2>&1
+    exit $?
+else
+    wait $INIT_PID
+    wait $INIT_PID
+    exit $?
+fi
