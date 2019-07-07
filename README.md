@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.org/wrouesnel/docker.netbox.svg?branch=master)](https://travis-ci.org/wrouesnel/docker.netbox)
+
 # Netbox Container for Standalone Deployment
 
 This is a self-contained container which builds and deploys Netbox.
