@@ -1,13 +1,17 @@
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
-from django.utils import timezone
 
-from .models import Circuit, CircuitTermination
+from dcim.signals import rebuild_paths
+
+from .models import CircuitTermination
 
 
 @receiver((post_save, post_delete), sender=CircuitTermination)
-def update_circuit(instance, **kwargs):
+def rebuild_cablepaths(instance, raw=False, **kwargs):
     """
-    When a CircuitTermination has been modified, update the last_updated time of its parent Circuit.
+    Rebuild any CablePaths which traverse the peer CircuitTermination.
     """
-    Circuit.objects.filter(pk=instance.circuit_id).update(last_updated=timezone.now())
+    if not raw:
+        peer_termination = instance.get_peer_termination()
+        if peer_termination:
+            rebuild_paths([peer_termination])

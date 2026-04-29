@@ -1,0 +1,10 @@
+{% extends 'generic/object.html' %}
+{% load i18n %}
+
+{% block extra_controls %}
+  {% if perms.circuits.add_virtualcircuit %}
+    <a href="{% url 'circuits:virtualcircuit_add' %}?type={{ object.pk }}" class="btn btn-primary">
+      <span class="mdi mdi-plus-thick" aria-hidden="true"></span> {% trans "Add Virtual Circuit" %}
+    </a>
+  {% endif %}
+{% endblock extra_controls %}

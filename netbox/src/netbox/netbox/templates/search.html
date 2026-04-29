@@ -1,67 +1,41 @@
-{% extends '_base.html' %}
+{% extends 'generic/_base.html' %}
 {% load helpers %}
 {% load form_helpers %}
+{% load render_table from django_tables2 %}
+{% load i18n %}
 
-{% block title %}Search{% endblock %}
+{% block title %}{% trans "Search" %}{% endblock %}
+
+{% block tabs %}
+  <ul class="nav nav-tabs">
+    <li class="nav-item" role="presentation">
+      <button class="nav-link active" type="button" role="tab">
+        {% trans "Results" %}
+      </button>
+    </li>
+  </ul>
+{% endblock tabs %}
 
 {% block content %}
-    {% if request.GET.q %}
-        {% include 'search_form.html' with search_form=form %}
-        {% if results %}
-            <div class="row">
-                <div class="col-md-10">
-                    {% for obj_type in results %}
-                        <h3 id="{{ obj_type.name|lower }}">{{ obj_type.name|bettertitle }}</h3>
-                        {% include 'panel_table.html' with table=obj_type.table %}
-                        <a href="{{ obj_type.url }}" class="btn btn-primary pull-right">
-                            <span class="fa fa-arrow-right" aria-hidden="true"></span>
-                            {% if obj_type.table.page.has_next %}
-                                See all {{ obj_type.table.page.paginator.count }} results
-                            {% else %}
-                                Refine search
-                            {% endif %}
-                        </a>
-                    <div class="clearfix"></div>
-                    {% endfor %}
-                </div>
-                <div class="col-md-2" style="padding-top: 20px;">
-                    <div class="panel panel-default">
-                        <div class="panel-heading">
-                            <strong>Search Results</strong>
-                        </div>
-                        <div class="list-group">
-                            {% for obj_type in results %}
-                                <a href="#{{ obj_type.name|lower }}" class="list-group-item">
-                                    {{ obj_type.name|bettertitle }}
-                                    <span class="badge">{{ obj_type.table.page.paginator.count }}</span>
-                                </a>
-                            {% endfor %}
-                        </div>
-                    </div>
-                </div>
-            </div>
-        {% else %}
-            <h3 class="text-muted text-center">No results found</h3>
-        {% endif %}
-    {% else %}
-        <div class="row" style="margin-top: 150px;">
-            <div class="col-sm-4 col-sm-offset-4">
-                <form action="{% url 'search' %}" method="get" class="form form-horizontal">
-                    <div class="panel panel-default">
-                        <div class="panel-heading">
-                            <strong>Search</strong>
-                        </div>
-                        <div class="panel-body">
-                            {% render_form form %}
-                        </div>
-                        <div class="panel-footer text-right">
-                            <button type="submit" class="btn btn-primary">
-                                <span class="fa fa-search" aria-hidden="true"></span> Search
-                            </button>
-                        </div>
-                    </div>
-                </form>
-            </div>
+  <div class="row">
+    <div class="col col-6 offset-3 py-3">
+      <form action="{% url 'search' %}" method="get" class="form form-horizontal">
+        {% render_form form %}
+        <div class="text-end">
+          <button type="submit" class="btn btn-primary">
+            <span class="mdi mdi-magnify" aria-hidden="true"></span> {% trans "Search" %}
+          </button>
         </div>
-    {% endif %}
-{% endblock %}
+      </form>
+    </div>
+  </div>
+  <div class="row">
+    <div class="col">
+      <div class="card">
+        <div class="htmx-container table-responsive" id="object_list">
+          {% include 'htmx/table.html' %}
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock content %}

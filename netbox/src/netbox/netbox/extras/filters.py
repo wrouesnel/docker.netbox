@@ -1,227 +1,38 @@
 import django_filters
-from django.contrib.contenttypes.models import ContentType
-from django.db.models import Q
 
-from dcim.models import DeviceRole, Platform, Region, Site
-from tenancy.models import Tenant, TenantGroup
-from .constants import CF_FILTER_DISABLED, CF_FILTER_EXACT, CF_TYPE_BOOLEAN, CF_TYPE_SELECT
-from .models import ConfigContext, CustomField, Graph, ExportTemplate, ObjectChange, Tag, TopologyMap
+from .models import Tag
+
+__all__ = (
+    'TagFilter',
+    'TagIDFilter',
+)
 
 
-class CustomFieldFilter(django_filters.Filter):
+class TagFilter(django_filters.ModelMultipleChoiceFilter):
     """
-    Filter objects by the presence of a CustomFieldValue. The filter's name is used as the CustomField name.
+    Match on one or more assigned tags. If multiple tags are specified (e.g. ?tag=foo&tag=bar), the queryset is filtered
+    to objects matching all tags.
     """
-
-    def __init__(self, custom_field, *args, **kwargs):
-        self.cf_type = custom_field.type
-        self.filter_logic = custom_field.filter_logic
-        super().__init__(*args, **kwargs)
-
-    def filter(self, queryset, value):
-
-        # Skip filter on empty value
-        if value is None or not value.strip():
-            return queryset
-
-        # Selection fields get special treatment (values must be integers)
-        if self.cf_type == CF_TYPE_SELECT:
-            try:
-                # Treat 0 as None
-                if int(value) == 0:
-                    return queryset.exclude(
-                        custom_field_values__field__name=self.field_name,
-                    )
-                # Match on exact CustomFieldChoice PK
-                else:
-                    return queryset.filter(
-                        custom_field_values__field__name=self.field_name,
-                        custom_field_values__serialized_value=value,
-                    )
-            except ValueError:
-                return queryset.none()
-
-        # Apply the assigned filter logic (exact or loose)
-        if self.cf_type == CF_TYPE_BOOLEAN or self.filter_logic == CF_FILTER_EXACT:
-            queryset = queryset.filter(
-                custom_field_values__field__name=self.field_name,
-                custom_field_values__serialized_value=value
-            )
-        else:
-            queryset = queryset.filter(
-                custom_field_values__field__name=self.field_name,
-                custom_field_values__serialized_value__icontains=value
-            )
-
-        return queryset
-
-
-class CustomFieldFilterSet(django_filters.FilterSet):
-    """
-    Dynamically add a Filter for each CustomField applicable to the parent model.
-    """
-
     def __init__(self, *args, **kwargs):
+
+        kwargs.setdefault('field_name', 'tags__slug')
+        kwargs.setdefault('to_field_name', 'slug')
+        kwargs.setdefault('conjoined', True)
+        kwargs.setdefault('queryset', Tag.objects.all())
+
         super().__init__(*args, **kwargs)
 
-        obj_type = ContentType.objects.get_for_model(self._meta.model)
-        custom_fields = CustomField.objects.filter(obj_type=obj_type).exclude(filter_logic=CF_FILTER_DISABLED)
-        for cf in custom_fields:
-            self.filters['cf_{}'.format(cf.name)] = CustomFieldFilter(field_name=cf.name, custom_field=cf)
 
+class TagIDFilter(django_filters.ModelMultipleChoiceFilter):
+    """
+    Match on one or more assigned tags. If multiple tags are specified (e.g. ?tag=1&tag=2), the queryset is filtered
+    to objects matching all tags.
+    """
+    def __init__(self, *args, **kwargs):
 
-class GraphFilter(django_filters.FilterSet):
+        kwargs.setdefault('field_name', 'tags__id')
+        kwargs.setdefault('to_field_name', 'id')
+        kwargs.setdefault('conjoined', True)
+        kwargs.setdefault('queryset', Tag.objects.all())
 
-    class Meta:
-        model = Graph
-        fields = ['type', 'name']
-
-
-class ExportTemplateFilter(django_filters.FilterSet):
-
-    class Meta:
-        model = ExportTemplate
-        fields = ['content_type', 'name', 'template_language']
-
-
-class TagFilter(django_filters.FilterSet):
-    q = django_filters.CharFilter(
-        method='search',
-        label='Search',
-    )
-
-    class Meta:
-        model = Tag
-        fields = ['name', 'slug']
-
-    def search(self, queryset, name, value):
-        if not value.strip():
-            return queryset
-        return queryset.filter(
-            Q(name__icontains=value) |
-            Q(slug__icontains=value)
-        )
-
-
-class TopologyMapFilter(django_filters.FilterSet):
-    site_id = django_filters.ModelMultipleChoiceFilter(
-        field_name='site',
-        queryset=Site.objects.all(),
-        label='Site',
-    )
-    site = django_filters.ModelMultipleChoiceFilter(
-        field_name='site__slug',
-        queryset=Site.objects.all(),
-        to_field_name='slug',
-        label='Site (slug)',
-    )
-
-    class Meta:
-        model = TopologyMap
-        fields = ['name', 'slug']
-
-
-class ConfigContextFilter(django_filters.FilterSet):
-    q = django_filters.CharFilter(
-        method='search',
-        label='Search',
-    )
-    region_id = django_filters.ModelMultipleChoiceFilter(
-        field_name='regions',
-        queryset=Region.objects.all(),
-        label='Region',
-    )
-    region = django_filters.ModelMultipleChoiceFilter(
-        field_name='regions__slug',
-        queryset=Region.objects.all(),
-        to_field_name='slug',
-        label='Region (slug)',
-    )
-    site_id = django_filters.ModelMultipleChoiceFilter(
-        field_name='sites',
-        queryset=Site.objects.all(),
-        label='Site',
-    )
-    site = django_filters.ModelMultipleChoiceFilter(
-        field_name='sites__slug',
-        queryset=Site.objects.all(),
-        to_field_name='slug',
-        label='Site (slug)',
-    )
-    role_id = django_filters.ModelMultipleChoiceFilter(
-        field_name='roles',
-        queryset=DeviceRole.objects.all(),
-        label='Role',
-    )
-    role = django_filters.ModelMultipleChoiceFilter(
-        field_name='roles__slug',
-        queryset=DeviceRole.objects.all(),
-        to_field_name='slug',
-        label='Role (slug)',
-    )
-    platform_id = django_filters.ModelMultipleChoiceFilter(
-        field_name='platforms',
-        queryset=Platform.objects.all(),
-        label='Platform',
-    )
-    platform = django_filters.ModelMultipleChoiceFilter(
-        field_name='platforms__slug',
-        queryset=Platform.objects.all(),
-        to_field_name='slug',
-        label='Platform (slug)',
-    )
-    tenant_group_id = django_filters.ModelMultipleChoiceFilter(
-        field_name='tenant_groups',
-        queryset=TenantGroup.objects.all(),
-        label='Tenant group',
-    )
-    tenant_group = django_filters.ModelMultipleChoiceFilter(
-        field_name='tenant_groups__slug',
-        queryset=TenantGroup.objects.all(),
-        to_field_name='slug',
-        label='Tenant group (slug)',
-    )
-    tenant_id = django_filters.ModelMultipleChoiceFilter(
-        field_name='tenants',
-        queryset=Tenant.objects.all(),
-        label='Tenant',
-    )
-    tenant = django_filters.ModelMultipleChoiceFilter(
-        field_name='tenants__slug',
-        queryset=Tenant.objects.all(),
-        to_field_name='slug',
-        label='Tenant (slug)',
-    )
-
-    class Meta:
-        model = ConfigContext
-        fields = ['name', 'is_active']
-
-    def search(self, queryset, name, value):
-        if not value.strip():
-            return queryset
-        return queryset.filter(
-            Q(name__icontains=value) |
-            Q(description__icontains=value) |
-            Q(data__icontains=value)
-        )
-
-
-class ObjectChangeFilter(django_filters.FilterSet):
-    q = django_filters.CharFilter(
-        method='search',
-        label='Search',
-    )
-    time = django_filters.DateTimeFromToRangeFilter()
-
-    class Meta:
-        model = ObjectChange
-        fields = ['user', 'user_name', 'request_id', 'action', 'changed_object_type', 'object_repr']
-
-    def search(self, queryset, name, value):
-        if not value.strip():
-            return queryset
-        return queryset.filter(
-            Q(user_name__icontains=value) |
-            Q(object_repr__icontains=value)
-        )
+        super().__init__(*args, **kwargs)

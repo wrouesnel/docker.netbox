@@ -1,0 +1,50 @@
+@use 'sass:map';
+
+// Serialized data from change records
+pre.change-data {
+  border-radius: 0;
+  padding: 0;
+  // Remove card-body padding
+  margin-inline: -0.75rem;
+
+  // Display each line individually for highlighting
+  > span {
+    display: block;
+    padding-inline: map.get($spacers, 2);
+    max-width: 100%;
+    min-width: fit-content;
+    border-left: map.get($spacers, 1) solid transparent;
+
+    &.added {
+      background-color: var(--tblr-green-200);
+      border-left-color: var(--tblr-green-darken);
+    }
+
+    &.removed {
+      background-color: var(--tblr-red-200);
+      border-left-color: var(--tblr-red-darken);
+    }
+  }
+}
+
+// Change data diff w/added & removed data
+pre.change-diff {
+  border: var(--tblr-border-width) solid transparent;
+
+  &.change-added {
+    background-color: var(--tblr-green-lt);
+    border-color: var(--tblr-green);
+  }
+
+  &.change-removed {
+    background-color: var(--tblr-red-lt);
+    border-color: var(--tblr-red);
+  }
+}
+
+// <pre> elements displayed with a border
+pre.block {
+  padding: $spacer;
+  border: var(--tblr-border-width) solid $border-color;
+  border-radius: $border-radius;
+}

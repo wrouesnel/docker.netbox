@@ -1,87 +1,96 @@
 from django.conf import settings
 from django.conf.urls import include
-from django.urls import path, re_path
-from django.views.static import serve
-from drf_yasg import openapi
-from drf_yasg.views import get_schema_view
+from django.urls import path
+from django.views.decorators.cache import cache_page
+from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 
-from netbox.views import APIRootView, HomeView, SearchView
-from users.views import LoginView, LogoutView
-from .admin import admin_site
-
-schema_view = get_schema_view(
-    openapi.Info(
-        title="NetBox API",
-        default_version='v2',
-        description="API to access NetBox",
-        terms_of_service="https://github.com/digitalocean/netbox",
-        contact=openapi.Contact(email="netbox@digitalocean.com"),
-        license=openapi.License(name="Apache v2 License"),
-    ),
-    validators=['flex', 'ssv'],
-    public=True,
-)
+from account.views import LoginView, LogoutView
+from netbox.api.views import APIRootView, AuthenticationCheckView, StatusView
+from netbox.graphql.schema import schema
+from netbox.graphql.views import NetBoxGraphQLView
+from netbox.plugins.urls import plugin_api_patterns, plugin_patterns
+from netbox.views import HomeView, MediaView, SearchView, StaticMediaFailureView, htmx
 
 _patterns = [
 
     # Base views
-    path(r'', HomeView.as_view(), name='home'),
-    path(r'search/', SearchView.as_view(), name='search'),
+    path('', HomeView.as_view(), name='home'),
+    path('search/', SearchView.as_view(), name='search'),
 
     # Login/logout
-    path(r'login/', LoginView.as_view(), name='login'),
-    path(r'logout/', LogoutView.as_view(), name='logout'),
+    path('login/', LoginView.as_view(), name='login'),
+    path('logout/', LogoutView.as_view(), name='logout'),
+    path('oauth/', include('social_django.urls', namespace='social')),
 
     # Apps
-    path(r'circuits/', include('circuits.urls')),
-    path(r'dcim/', include('dcim.urls')),
-    path(r'extras/', include('extras.urls')),
-    path(r'ipam/', include('ipam.urls')),
-    path(r'secrets/', include('secrets.urls')),
-    path(r'tenancy/', include('tenancy.urls')),
-    path(r'user/', include('users.urls')),
-    path(r'virtualization/', include('virtualization.urls')),
+    path('circuits/', include('circuits.urls')),
+    path('core/', include('core.urls')),
+    path('dcim/', include('dcim.urls')),
+    path('extras/', include('extras.urls')),
+    path('ipam/', include('ipam.urls')),
+    path('tenancy/', include('tenancy.urls')),
+    path('users/', include('users.urls')),
+    path('virtualization/', include('virtualization.urls')),
+    path('vpn/', include('vpn.urls')),
+    path('wireless/', include('wireless.urls')),
 
-    # API
-    path(r'api/', APIRootView.as_view(), name='api-root'),
-    path(r'api/circuits/', include('circuits.api.urls')),
-    path(r'api/dcim/', include('dcim.api.urls')),
-    path(r'api/extras/', include('extras.api.urls')),
-    path(r'api/ipam/', include('ipam.api.urls')),
-    path(r'api/secrets/', include('secrets.api.urls')),
-    path(r'api/tenancy/', include('tenancy.api.urls')),
-    path(r'api/virtualization/', include('virtualization.api.urls')),
-    path(r'api/docs/', schema_view.with_ui('swagger'), name='api_docs'),
-    path(r'api/redoc/', schema_view.with_ui('redoc'), name='api_redocs'),
-    re_path(r'^api/swagger(?P<format>.json|.yaml)$', schema_view.without_ui(), name='schema_swagger'),
+    # Current user views
+    path('user/', include('account.urls')),
+
+    # HTMX views
+    path('htmx/object-selector/', htmx.ObjectSelectorView.as_view(), name='htmx_object_selector'),
+
+    # REST API
+    path('api/', APIRootView.as_view(), name='api-root'),
+    path('api/circuits/', include('circuits.api.urls')),
+    path('api/core/', include('core.api.urls')),
+    path('api/dcim/', include('dcim.api.urls')),
+    path('api/extras/', include('extras.api.urls')),
+    path('api/ipam/', include('ipam.api.urls')),
+    path('api/tenancy/', include('tenancy.api.urls')),
+    path('api/users/', include('users.api.urls')),
+    path('api/virtualization/', include('virtualization.api.urls')),
+    path('api/vpn/', include('vpn.api.urls')),
+    path('api/wireless/', include('wireless.api.urls')),
+    path('api/status/', StatusView.as_view(), name='api-status'),
+    path('api/authentication-check/', AuthenticationCheckView.as_view(), name='api-authentication-check'),
+
+    # REST API schema
+    path(
+        "api/schema/",
+        cache_page(timeout=86400, key_prefix=f"api_schema_{settings.RELEASE.version}")(
+            SpectacularAPIView.as_view()
+        ),
+        name="schema",
+    ),
+    path('api/schema/swagger-ui/', SpectacularSwaggerView.as_view(url_name='schema'), name='api_docs'),
+    path('api/schema/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='api_redocs'),
+
+    # GraphQL
+    path('graphql/', NetBoxGraphQLView.as_view(schema=schema), name='graphql'),
 
     # Serving static media in Django to pipe it through LoginRequiredMiddleware
-    path(r'media/<path:path>', serve, {'document_root': settings.MEDIA_ROOT}),
+    path('media/<path:path>', MediaView.as_view(), name='media'),
+    path('media-failure/', StaticMediaFailureView.as_view(), name='media_failure'),
 
-    # Admin
-    path(r'admin/', admin_site.urls),
-
+    # Plugins
+    path('plugins/', include((plugin_patterns, 'plugins'))),
+    path('api/plugins/', include((plugin_api_patterns, 'plugins-api'))),
 ]
 
-if settings.WEBHOOKS_ENABLED:
-    _patterns += [
-        path(r'admin/webhook-backend-status/', include('django_rq.urls')),
-    ]
-
+# django-debug-toolbar
 if settings.DEBUG:
     import debug_toolbar
-    _patterns += [
-        path(r'__debug__/', include(debug_toolbar.urls)),
-    ]
+    _patterns.append(path('__debug__/', include(debug_toolbar.urls)))
 
+# Prometheus metrics
 if settings.METRICS_ENABLED:
-    _patterns += [
-        path('', include('django_prometheus.urls')),
-    ]
+    _patterns.append(path('', include('django_prometheus.urls')))
 
 # Prepend BASE_PATH
 urlpatterns = [
-    path(r'{}'.format(settings.BASE_PATH), include(_patterns))
+    path(settings.BASE_PATH, include(_patterns))
 ]
 
-handler500 = 'utilities.views.server_error'
+handler404 = 'netbox.views.errors.handler_404'
+handler500 = 'netbox.views.errors.handler_500'

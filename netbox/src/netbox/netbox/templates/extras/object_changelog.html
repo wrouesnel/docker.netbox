@@ -1,13 +1,19 @@
 {% extends base_template %}
-
-{% block title %}{% if obj %}{{ obj }}{% else %}{{ block.super }}{% endif %} - Changelog{% endblock %}
+{% load render_table from django_tables2 %}
+{% load i18n %}
 
 {% block content %}
-    {% if obj %}<h1>{{ obj }}</h1>{% endif %}
-    {% include 'panel_table.html' with table=objectchanges_table %}
-    {% if settings.CHANGELOG_RETENTION %}
-        <div class="pull-right text-muted">
-            Changelog retention: {{ settings.CHANGELOG_RETENTION }} days
+  <div class="row mb-3">
+    <div class="col col-md-12">
+      <div class="card">
+        <div class="table-responsive">
+          {% render_table table 'inc/table.html' %}
+          {% include 'inc/paginator.html' with paginator=table.paginator page=table.page %}
         </div>
-    {% endif %}
+      </div>
+      <div class="text-muted">
+        {% trans "Change log retention" %}: {% if config.CHANGELOG_RETENTION %}{{ config.CHANGELOG_RETENTION }} {% trans "days" %}{% else %}{% trans "Indefinite" %}{% endif %}
+      </div>
+    </div>
+  </div>
 {% endblock %}

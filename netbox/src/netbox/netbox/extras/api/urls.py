@@ -1,48 +1,36 @@
-from rest_framework import routers
+from django.urls import include, path
+
+from netbox.api.routers import NetBoxRouter
 
 from . import views
 
+router = NetBoxRouter()
+router.APIRootView = views.ExtrasRootView
 
-class ExtrasRootView(routers.APIRootView):
-    """
-    Extras API root view
-    """
-    def get_view_name(self):
-        return 'Extras'
-
-
-router = routers.DefaultRouter()
-router.APIRootView = ExtrasRootView
-
-# Field choices
-router.register(r'_choices', views.ExtrasFieldChoicesViewSet, basename='field-choice')
-
-# Custom field choices
-router.register(r'_custom_field_choices', views.CustomFieldChoicesViewSet, base_name='custom-field-choice')
-
-# Graphs
-router.register(r'graphs', views.GraphViewSet)
-
-# Export templates
-router.register(r'export-templates', views.ExportTemplateViewSet)
-
-# Topology maps
-router.register(r'topology-maps', views.TopologyMapViewSet)
-
-# Tags
-router.register(r'tags', views.TagViewSet)
-
-# Image attachments
-router.register(r'image-attachments', views.ImageAttachmentViewSet)
-
-# Config contexts
-router.register(r'config-contexts', views.ConfigContextViewSet)
-
-# Reports
-router.register(r'reports', views.ReportViewSet, basename='report')
-
-# Change logging
-router.register(r'object-changes', views.ObjectChangeViewSet)
+router.register('event-rules', views.EventRuleViewSet)
+router.register('webhooks', views.WebhookViewSet)
+router.register('custom-fields', views.CustomFieldViewSet)
+router.register('custom-field-choice-sets', views.CustomFieldChoiceSetViewSet)
+router.register('custom-links', views.CustomLinkViewSet)
+router.register('export-templates', views.ExportTemplateViewSet)
+router.register('saved-filters', views.SavedFilterViewSet)
+router.register('table-configs', views.TableConfigViewSet)
+router.register('bookmarks', views.BookmarkViewSet)
+router.register('notifications', views.NotificationViewSet)
+router.register('notification-groups', views.NotificationGroupViewSet)
+router.register('subscriptions', views.SubscriptionViewSet)
+router.register('tags', views.TagViewSet)
+router.register('tagged-objects', views.TaggedItemViewSet)
+router.register('image-attachments', views.ImageAttachmentViewSet)
+router.register('journal-entries', views.JournalEntryViewSet)
+router.register('config-contexts', views.ConfigContextViewSet)
+router.register('config-context-profiles', views.ConfigContextProfileViewSet)
+router.register('config-templates', views.ConfigTemplateViewSet)
+router.register('scripts/upload', views.ScriptModuleViewSet)
+router.register('scripts', views.ScriptViewSet, basename='script')
 
 app_name = 'extras-api'
-urlpatterns = router.urls
+urlpatterns = [
+    path('dashboard/', views.DashboardView.as_view(), name='dashboard'),
+    path('', include(router.urls)),
+]

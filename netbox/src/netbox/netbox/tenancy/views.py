@@ -1,130 +1,512 @@
-from django.contrib.auth.mixins import PermissionRequiredMixin
-from django.db.models import Count
-from django.shortcuts import get_object_or_404, render
-from django.views.generic import View
+from django.contrib.contenttypes.models import ContentType
+from django.shortcuts import get_object_or_404
+from django.utils.translation import gettext_lazy as _
 
-from circuits.models import Circuit
-from dcim.models import Site, Rack, Device, RackReservation
-from ipam.models import IPAddress, Prefix, VLAN, VRF
-from utilities.views import (
-    BulkDeleteView, BulkEditView, BulkImportView, ObjectDeleteView, ObjectEditView, ObjectListView,
+from extras.ui.panels import CustomFieldsPanel, TagsPanel
+from netbox.object_actions import BulkDelete, BulkEdit, BulkExport, BulkImport
+from netbox.ui import actions, layout
+from netbox.ui.panels import (
+    CommentsPanel,
+    NestedGroupObjectPanel,
+    ObjectsTablePanel,
+    OrganizationalObjectPanel,
+    RelatedObjectsPanel,
 )
-from virtualization.models import VirtualMachine
-from . import filters, forms, tables
-from .models import Tenant, TenantGroup
+from netbox.views import generic
+from utilities.query import count_related
+from utilities.views import GetRelatedModelsMixin, register_model_view
 
+from . import filtersets, forms, tables
+from .models import *
+from .ui import panels
 
 #
 # Tenant groups
 #
 
-class TenantGroupListView(PermissionRequiredMixin, ObjectListView):
-    permission_required = 'tenancy.view_tenantgroup'
-    queryset = TenantGroup.objects.annotate(tenant_count=Count('tenants'))
+
+@register_model_view(TenantGroup, 'list', path='', detail=False)
+class TenantGroupListView(generic.ObjectListView):
+    queryset = TenantGroup.objects.add_related_count(
+        TenantGroup.objects.all(),
+        Tenant,
+        'group',
+        'tenant_count',
+        cumulative=True
+    )
+    filterset = filtersets.TenantGroupFilterSet
+    filterset_form = forms.TenantGroupFilterForm
     table = tables.TenantGroupTable
-    template_name = 'tenancy/tenantgroup_list.html'
 
 
-class TenantGroupCreateView(PermissionRequiredMixin, ObjectEditView):
-    permission_required = 'tenancy.add_tenantgroup'
-    model = TenantGroup
-    model_form = forms.TenantGroupForm
-    default_return_url = 'tenancy:tenantgroup_list'
+@register_model_view(TenantGroup)
+class TenantGroupView(GetRelatedModelsMixin, generic.ObjectView):
+    queryset = TenantGroup.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            NestedGroupObjectPanel(),
+            TagsPanel(),
+            CommentsPanel(),
+        ],
+        right_panels=[
+            RelatedObjectsPanel(),
+            CustomFieldsPanel(),
+        ],
+        bottom_panels=[
+            ObjectsTablePanel(
+                'tenancy.tenantgroup',
+                filters={'parent_id': lambda ctx: ctx['object'].pk},
+                title=_('Child Groups'),
+                actions=[
+                    actions.AddObject(
+                        'tenancy.tenantgroup',
+                        url_params={'parent': lambda ctx: ctx['object'].pk},
+                        label=_('Add Tenant Group'),
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    def get_extra_context(self, request, instance):
+        groups = instance.get_descendants(include_self=True)
+
+        return {
+            'related_models': self.get_related_models(request, groups),
+        }
 
 
-class TenantGroupEditView(TenantGroupCreateView):
-    permission_required = 'tenancy.change_tenantgroup'
+@register_model_view(TenantGroup, 'add', detail=False)
+@register_model_view(TenantGroup, 'edit')
+class TenantGroupEditView(generic.ObjectEditView):
+    queryset = TenantGroup.objects.all()
+    form = forms.TenantGroupForm
 
 
-class TenantGroupBulkImportView(PermissionRequiredMixin, BulkImportView):
-    permission_required = 'tenancy.add_tenantgroup'
-    model_form = forms.TenantGroupCSVForm
+@register_model_view(TenantGroup, 'delete')
+class TenantGroupDeleteView(generic.ObjectDeleteView):
+    queryset = TenantGroup.objects.all()
+
+
+@register_model_view(TenantGroup, 'bulk_import', path='import', detail=False)
+class TenantGroupBulkImportView(generic.BulkImportView):
+    queryset = TenantGroup.objects.all()
+    model_form = forms.TenantGroupImportForm
+
+
+@register_model_view(TenantGroup, 'bulk_edit', path='edit', detail=False)
+class TenantGroupBulkEditView(generic.BulkEditView):
+    queryset = TenantGroup.objects.add_related_count(
+        TenantGroup.objects.all(),
+        Tenant,
+        'group',
+        'tenant_count',
+        cumulative=True
+    )
+    filterset = filtersets.TenantGroupFilterSet
     table = tables.TenantGroupTable
-    default_return_url = 'tenancy:tenantgroup_list'
+    form = forms.TenantGroupBulkEditForm
 
 
-class TenantGroupBulkDeleteView(PermissionRequiredMixin, BulkDeleteView):
-    permission_required = 'tenancy.delete_tenantgroup'
-    queryset = TenantGroup.objects.annotate(tenant_count=Count('tenants'))
+@register_model_view(TenantGroup, 'bulk_rename', path='rename', detail=False)
+class TenantGroupBulkRenameView(generic.BulkRenameView):
+    queryset = TenantGroup.objects.all()
+    filterset = filtersets.TenantGroupFilterSet
+
+
+@register_model_view(TenantGroup, 'bulk_delete', path='delete', detail=False)
+class TenantGroupBulkDeleteView(generic.BulkDeleteView):
+    queryset = TenantGroup.objects.add_related_count(
+        TenantGroup.objects.all(),
+        Tenant,
+        'group',
+        'tenant_count',
+        cumulative=True
+    )
+    filterset = filtersets.TenantGroupFilterSet
     table = tables.TenantGroupTable
-    default_return_url = 'tenancy:tenantgroup_list'
 
 
 #
 #  Tenants
 #
 
-class TenantListView(PermissionRequiredMixin, ObjectListView):
-    permission_required = 'tenancy.view_tenant'
-    queryset = Tenant.objects.select_related('group')
-    filter = filters.TenantFilter
-    filter_form = forms.TenantFilterForm
+@register_model_view(Tenant, 'list', path='', detail=False)
+class TenantListView(generic.ObjectListView):
+    queryset = Tenant.objects.all()
+    filterset = filtersets.TenantFilterSet
+    filterset_form = forms.TenantFilterForm
     table = tables.TenantTable
-    template_name = 'tenancy/tenant_list.html'
 
 
-class TenantView(PermissionRequiredMixin, View):
-    permission_required = 'tenancy.view_tenant'
+@register_model_view(Tenant)
+class TenantView(GetRelatedModelsMixin, generic.ObjectView):
+    queryset = Tenant.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.TenantPanel(),
+            CustomFieldsPanel(),
+            TagsPanel(),
+            CommentsPanel(),
+        ],
+        right_panels=[
+            RelatedObjectsPanel(),
+        ],
+    )
 
-    def get(self, request, slug):
-
-        tenant = get_object_or_404(Tenant, slug=slug)
-        stats = {
-            'site_count': Site.objects.filter(tenant=tenant).count(),
-            'rack_count': Rack.objects.filter(tenant=tenant).count(),
-            'rackreservation_count': RackReservation.objects.filter(tenant=tenant).count(),
-            'device_count': Device.objects.filter(tenant=tenant).count(),
-            'vrf_count': VRF.objects.filter(tenant=tenant).count(),
-            'prefix_count': Prefix.objects.filter(tenant=tenant).count(),
-            'ipaddress_count': IPAddress.objects.filter(tenant=tenant).count(),
-            'vlan_count': VLAN.objects.filter(tenant=tenant).count(),
-            'circuit_count': Circuit.objects.filter(tenant=tenant).count(),
-            'virtualmachine_count': VirtualMachine.objects.filter(tenant=tenant).count(),
+    def get_extra_context(self, request, instance):
+        return {
+            'related_models': self.get_related_models(request, instance),
         }
 
-        return render(request, 'tenancy/tenant.html', {
-            'tenant': tenant,
-            'stats': stats,
-        })
+
+@register_model_view(Tenant, 'add', detail=False)
+@register_model_view(Tenant, 'edit')
+class TenantEditView(generic.ObjectEditView):
+    queryset = Tenant.objects.all()
+    form = forms.TenantForm
 
 
-class TenantCreateView(PermissionRequiredMixin, ObjectEditView):
-    permission_required = 'tenancy.add_tenant'
-    model = Tenant
-    model_form = forms.TenantForm
-    template_name = 'tenancy/tenant_edit.html'
-    default_return_url = 'tenancy:tenant_list'
+@register_model_view(Tenant, 'delete')
+class TenantDeleteView(generic.ObjectDeleteView):
+    queryset = Tenant.objects.all()
 
 
-class TenantEditView(TenantCreateView):
-    permission_required = 'tenancy.change_tenant'
+@register_model_view(Tenant, 'bulk_import', path='import', detail=False)
+class TenantBulkImportView(generic.BulkImportView):
+    queryset = Tenant.objects.all()
+    model_form = forms.TenantImportForm
 
 
-class TenantDeleteView(PermissionRequiredMixin, ObjectDeleteView):
-    permission_required = 'tenancy.delete_tenant'
-    model = Tenant
-    default_return_url = 'tenancy:tenant_list'
-
-
-class TenantBulkImportView(PermissionRequiredMixin, BulkImportView):
-    permission_required = 'tenancy.add_tenant'
-    model_form = forms.TenantCSVForm
-    table = tables.TenantTable
-    default_return_url = 'tenancy:tenant_list'
-
-
-class TenantBulkEditView(PermissionRequiredMixin, BulkEditView):
-    permission_required = 'tenancy.change_tenant'
-    queryset = Tenant.objects.select_related('group')
-    filter = filters.TenantFilter
+@register_model_view(Tenant, 'bulk_edit', path='edit', detail=False)
+class TenantBulkEditView(generic.BulkEditView):
+    queryset = Tenant.objects.all()
+    filterset = filtersets.TenantFilterSet
     table = tables.TenantTable
     form = forms.TenantBulkEditForm
-    default_return_url = 'tenancy:tenant_list'
 
 
-class TenantBulkDeleteView(PermissionRequiredMixin, BulkDeleteView):
-    permission_required = 'tenancy.delete_tenant'
-    queryset = Tenant.objects.select_related('group')
-    filter = filters.TenantFilter
+@register_model_view(Tenant, 'bulk_rename', path='rename', detail=False)
+class TenantBulkRenameView(generic.BulkRenameView):
+    queryset = Tenant.objects.all()
+    filterset = filtersets.TenantFilterSet
+
+
+@register_model_view(Tenant, 'bulk_delete', path='delete', detail=False)
+class TenantBulkDeleteView(generic.BulkDeleteView):
+    queryset = Tenant.objects.all()
+    filterset = filtersets.TenantFilterSet
     table = tables.TenantTable
-    default_return_url = 'tenancy:tenant_list'
+
+
+#
+# Contact groups
+#
+
+@register_model_view(ContactGroup, 'list', path='', detail=False)
+class ContactGroupListView(generic.ObjectListView):
+    queryset = ContactGroup.objects.annotate_contacts()
+    filterset = filtersets.ContactGroupFilterSet
+    filterset_form = forms.ContactGroupFilterForm
+    table = tables.ContactGroupTable
+
+
+@register_model_view(ContactGroup)
+class ContactGroupView(GetRelatedModelsMixin, generic.ObjectView):
+    queryset = ContactGroup.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            NestedGroupObjectPanel(),
+            TagsPanel(),
+            CommentsPanel(),
+        ],
+        right_panels=[
+            RelatedObjectsPanel(),
+            CustomFieldsPanel(),
+        ],
+        bottom_panels=[
+            ObjectsTablePanel(
+                'tenancy.contactgroup',
+                filters={'parent_id': lambda ctx: ctx['object'].pk},
+                title=_('Child Groups'),
+                actions=[
+                    actions.AddObject(
+                        'tenancy.contactgroup',
+                        url_params={'parent': lambda ctx: ctx['object'].pk},
+                        label=_('Add Contact Group'),
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    def get_extra_context(self, request, instance):
+        groups = instance.get_descendants(include_self=True)
+
+        return {
+            'related_models': self.get_related_models(
+                request,
+                groups,
+                extra=(
+                    (Contact.objects.restrict(request.user, 'view').filter(groups__in=groups).distinct(), 'group_id'),
+                ),
+            ),
+        }
+
+
+@register_model_view(ContactGroup, 'add', detail=False)
+@register_model_view(ContactGroup, 'edit')
+class ContactGroupEditView(generic.ObjectEditView):
+    queryset = ContactGroup.objects.all()
+    form = forms.ContactGroupForm
+
+
+@register_model_view(ContactGroup, 'delete')
+class ContactGroupDeleteView(generic.ObjectDeleteView):
+    queryset = ContactGroup.objects.all()
+
+
+@register_model_view(ContactGroup, 'bulk_import', path='import', detail=False)
+class ContactGroupBulkImportView(generic.BulkImportView):
+    queryset = ContactGroup.objects.all()
+    model_form = forms.ContactGroupImportForm
+
+
+@register_model_view(ContactGroup, 'bulk_edit', path='edit', detail=False)
+class ContactGroupBulkEditView(generic.BulkEditView):
+    queryset = ContactGroup.objects.annotate_contacts()
+    filterset = filtersets.ContactGroupFilterSet
+    table = tables.ContactGroupTable
+    form = forms.ContactGroupBulkEditForm
+
+
+@register_model_view(ContactGroup, 'bulk_rename', path='rename', detail=False)
+class ContactGroupBulkRenameView(generic.BulkRenameView):
+    queryset = ContactGroup.objects.all()
+    filterset = filtersets.ContactGroupFilterSet
+
+
+@register_model_view(ContactGroup, 'bulk_delete', path='delete', detail=False)
+class ContactGroupBulkDeleteView(generic.BulkDeleteView):
+    queryset = ContactGroup.objects.annotate_contacts()
+    filterset = filtersets.ContactGroupFilterSet
+    table = tables.ContactGroupTable
+
+
+#
+# Contact roles
+#
+
+@register_model_view(ContactRole, 'list', path='', detail=False)
+class ContactRoleListView(generic.ObjectListView):
+    queryset = ContactRole.objects.all()
+    filterset = filtersets.ContactRoleFilterSet
+    filterset_form = forms.ContactRoleFilterForm
+    table = tables.ContactRoleTable
+
+
+@register_model_view(ContactRole)
+class ContactRoleView(GetRelatedModelsMixin, generic.ObjectView):
+    queryset = ContactRole.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            OrganizationalObjectPanel(),
+            TagsPanel(),
+        ],
+        right_panels=[
+            RelatedObjectsPanel(),
+            CommentsPanel(),
+            CustomFieldsPanel(),
+        ],
+    )
+
+    def get_extra_context(self, request, instance):
+        return {
+            'related_models': self.get_related_models(request, instance),
+        }
+
+
+@register_model_view(ContactRole, 'add', detail=False)
+@register_model_view(ContactRole, 'edit')
+class ContactRoleEditView(generic.ObjectEditView):
+    queryset = ContactRole.objects.all()
+    form = forms.ContactRoleForm
+
+
+@register_model_view(ContactRole, 'delete')
+class ContactRoleDeleteView(generic.ObjectDeleteView):
+    queryset = ContactRole.objects.all()
+
+
+@register_model_view(ContactRole, 'bulk_import', path='import', detail=False)
+class ContactRoleBulkImportView(generic.BulkImportView):
+    queryset = ContactRole.objects.all()
+    model_form = forms.ContactRoleImportForm
+
+
+@register_model_view(ContactRole, 'bulk_edit', path='edit', detail=False)
+class ContactRoleBulkEditView(generic.BulkEditView):
+    queryset = ContactRole.objects.all()
+    filterset = filtersets.ContactRoleFilterSet
+    table = tables.ContactRoleTable
+    form = forms.ContactRoleBulkEditForm
+
+
+@register_model_view(ContactRole, 'bulk_rename', path='rename', detail=False)
+class ContactRoleBulkRenameView(generic.BulkRenameView):
+    queryset = ContactRole.objects.all()
+    filterset = filtersets.ContactRoleFilterSet
+
+
+@register_model_view(ContactRole, 'bulk_delete', path='delete', detail=False)
+class ContactRoleBulkDeleteView(generic.BulkDeleteView):
+    queryset = ContactRole.objects.all()
+    filterset = filtersets.ContactRoleFilterSet
+    table = tables.ContactRoleTable
+
+
+#
+# Contacts
+#
+
+@register_model_view(Contact, 'list', path='', detail=False)
+class ContactListView(generic.ObjectListView):
+    queryset = Contact.objects.annotate(
+        assignment_count=count_related(ContactAssignment, 'contact')
+    )
+    filterset = filtersets.ContactFilterSet
+    filterset_form = forms.ContactFilterForm
+    table = tables.ContactTable
+
+
+@register_model_view(Contact)
+class ContactView(generic.ObjectView):
+    queryset = Contact.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.ContactPanel(),
+            TagsPanel(),
+        ],
+        right_panels=[
+            CommentsPanel(),
+            CustomFieldsPanel(),
+        ],
+        bottom_panels=[
+            ObjectsTablePanel(
+                'tenancy.contactassignment',
+                filters={'contact_id': lambda ctx: ctx['object'].pk},
+                title=_('Assignments'),
+            ),
+        ],
+    )
+
+
+@register_model_view(Contact, 'add', detail=False)
+@register_model_view(Contact, 'edit')
+class ContactEditView(generic.ObjectEditView):
+    queryset = Contact.objects.all()
+    form = forms.ContactForm
+
+
+@register_model_view(Contact, 'delete')
+class ContactDeleteView(generic.ObjectDeleteView):
+    queryset = Contact.objects.all()
+
+
+@register_model_view(Contact, 'bulk_import', path='import', detail=False)
+class ContactBulkImportView(generic.BulkImportView):
+    queryset = Contact.objects.all()
+    model_form = forms.ContactImportForm
+
+
+@register_model_view(Contact, 'bulk_edit', path='edit', detail=False)
+class ContactBulkEditView(generic.BulkEditView):
+    queryset = Contact.objects.annotate(
+        assignment_count=count_related(ContactAssignment, 'contact')
+    )
+    filterset = filtersets.ContactFilterSet
+    table = tables.ContactTable
+    form = forms.ContactBulkEditForm
+
+    def post_save_operations(self, form, obj):
+        super().post_save_operations(form, obj)
+
+        # Add/remove groups
+        if form.cleaned_data.get('add_groups', None):
+            obj.groups.add(*form.cleaned_data['add_groups'])
+        if form.cleaned_data.get('remove_groups', None):
+            obj.groups.remove(*form.cleaned_data['remove_groups'])
+
+
+@register_model_view(Contact, 'bulk_rename', path='rename', detail=False)
+class ContactBulkRenameView(generic.BulkRenameView):
+    queryset = Contact.objects.all()
+    filterset = filtersets.ContactFilterSet
+
+
+@register_model_view(Contact, 'bulk_delete', path='delete', detail=False)
+class ContactBulkDeleteView(generic.BulkDeleteView):
+    queryset = Contact.objects.annotate(
+        assignment_count=count_related(ContactAssignment, 'contact')
+    )
+    filterset = filtersets.ContactFilterSet
+    table = tables.ContactTable
+
+
+#
+# Contact assignments
+#
+
+@register_model_view(ContactAssignment, 'list', path='', detail=False)
+class ContactAssignmentListView(generic.ObjectListView):
+    queryset = ContactAssignment.objects.all()
+    filterset = filtersets.ContactAssignmentFilterSet
+    filterset_form = forms.ContactAssignmentFilterForm
+    table = tables.ContactAssignmentTable
+    actions = (BulkExport, BulkImport, BulkEdit, BulkDelete)
+
+
+@register_model_view(ContactAssignment, 'add', detail=False)
+@register_model_view(ContactAssignment, 'edit')
+class ContactAssignmentEditView(generic.ObjectEditView):
+    queryset = ContactAssignment.objects.all()
+    form = forms.ContactAssignmentForm
+
+    def alter_object(self, instance, request, args, kwargs):
+        if not instance.pk:
+            # Assign the object based on URL kwargs
+            object_type = get_object_or_404(ContentType, pk=request.GET.get('object_type'))
+            instance.object = get_object_or_404(object_type.model_class(), pk=request.GET.get('object_id'))
+        return instance
+
+    def get_extra_addanother_params(self, request):
+        return {
+            'object_type': request.GET.get('object_type'),
+            'object_id': request.GET.get('object_id'),
+        }
+
+
+@register_model_view(ContactAssignment, 'bulk_import', path='import', detail=False)
+class ContactAssignmentBulkImportView(generic.BulkImportView):
+    queryset = ContactAssignment.objects.all()
+    model_form = forms.ContactAssignmentImportForm
+
+
+@register_model_view(ContactAssignment, 'bulk_edit', path='edit', detail=False)
+class ContactAssignmentBulkEditView(generic.BulkEditView):
+    queryset = ContactAssignment.objects.all()
+    filterset = filtersets.ContactAssignmentFilterSet
+    table = tables.ContactAssignmentTable
+    form = forms.ContactAssignmentBulkEditForm
+
+
+@register_model_view(ContactAssignment, 'bulk_delete', path='delete', detail=False)
+class ContactAssignmentBulkDeleteView(generic.BulkDeleteView):
+    queryset = ContactAssignment.objects.all()
+    filterset = filtersets.ContactAssignmentFilterSet
+    table = tables.ContactAssignmentTable
+
+
+@register_model_view(ContactAssignment, 'delete')
+class ContactAssignmentDeleteView(generic.ObjectDeleteView):
+    queryset = ContactAssignment.objects.all()

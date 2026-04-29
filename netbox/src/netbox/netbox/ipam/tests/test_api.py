@@ -1,547 +1,460 @@
 import json
+import logging
 
+from django.test import tag
 from django.urls import reverse
 from netaddr import IPNetwork
 from rest_framework import status
 
-from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
-from ipam.constants import IP_PROTOCOL_TCP, IP_PROTOCOL_UDP
-from ipam.models import Aggregate, IPAddress, Prefix, RIR, Role, Service, VLAN, VLANGroup, VRF
-from utilities.testing import APITestCase
+from dcim.models import Device, DeviceRole, DeviceType, Interface, Manufacturer, Site
+from ipam.choices import *
+from ipam.models import *
+from tenancy.models import Tenant
+from utilities.data import string_to_ranges
+from utilities.testing import APITestCase, APIViewTestCases, create_test_device, disable_logging
 
 
-class VRFTest(APITestCase):
+class AppTest(APITestCase):
 
-    def setUp(self):
+    def test_root(self):
 
-        super().setUp()
+        url = reverse('ipam-api:api-root')
+        response = self.client.get('{}?format=api'.format(url), **self.header)
 
-        self.vrf1 = VRF.objects.create(name='Test VRF 1', rd='65000:1')
-        self.vrf2 = VRF.objects.create(name='Test VRF 2', rd='65000:2')
-        self.vrf3 = VRF.objects.create(name='Test VRF 3')  # No RD
+        self.assertEqual(response.status_code, 200)
 
-    def test_get_vrf(self):
 
-        url = reverse('ipam-api:vrf-detail', kwargs={'pk': self.vrf1.pk})
-        response = self.client.get(url, **self.header)
+class ASNRangeTest(APIViewTestCases.APIViewTestCase):
+    model = ASNRange
+    brief_fields = ['description', 'display', 'id', 'name', 'url']
+    bulk_update_data = {
+        'description': 'New description',
+    }
 
-        self.assertEqual(response.data['name'], self.vrf1.name)
-
-    def test_list_vrfs(self):
-
-        url = reverse('ipam-api:vrf-list')
-        response = self.client.get(url, **self.header)
-
-        self.assertEqual(response.data['count'], 3)
-
-    def test_list_vrfs_brief(self):
-
-        url = reverse('ipam-api:vrf-list')
-        response = self.client.get('{}?brief=1'.format(url), **self.header)
-
-        self.assertEqual(
-            sorted(response.data['results'][0]),
-            ['id', 'name', 'prefix_count', 'rd', 'url']
+    @classmethod
+    def setUpTestData(cls):
+        rirs = (
+            RIR(name='RIR 1', slug='rir-1', is_private=True),
+            RIR(name='RIR 2', slug='rir-2', is_private=True),
         )
+        RIR.objects.bulk_create(rirs)
 
-    def test_create_vrf(self):
+        tenants = (
+            Tenant(name='Tenant 1', slug='tenant-1'),
+            Tenant(name='Tenant 2', slug='tenant-2'),
+        )
+        Tenant.objects.bulk_create(tenants)
 
-        data_list = [
-            # VRF with RD
+        asn_ranges = (
+            ASNRange(name='ASN Range 1', slug='asn-range-1', rir=rirs[0], tenant=tenants[0], start=100, end=199),
+            ASNRange(name='ASN Range 2', slug='asn-range-2', rir=rirs[0], tenant=tenants[0], start=200, end=299),
+            ASNRange(name='ASN Range 3', slug='asn-range-3', rir=rirs[0], tenant=tenants[0], start=300, end=399),
+        )
+        ASNRange.objects.bulk_create(asn_ranges)
+
+        cls.create_data = [
             {
-                'name': 'Test VRF 4',
-                'rd': '65000:4',
+                'name': 'ASN Range 4',
+                'slug': 'asn-range-4',
+                'rir': rirs[1].pk,
+                'start': 400,
+                'end': 499,
+                'tenant': tenants[1].pk,
             },
-            # VRF without RD
             {
-                'name': 'Test VRF 5',
-            }
+                'name': 'ASN Range 5',
+                'slug': 'asn-range-5',
+                'rir': rirs[1].pk,
+                'start': 500,
+                'end': 599,
+                'tenant': tenants[1].pk,
+            },
+            {
+                'name': 'ASN Range 6',
+                'slug': 'asn-range-6',
+                'rir': rirs[1].pk,
+                'start': 600,
+                'end': 699,
+                'tenant': tenants[1].pk,
+            },
         ]
 
-        url = reverse('ipam-api:vrf-list')
+    def test_list_available_asns(self):
+        """
+        Test retrieval of all available ASNs within a parent range.
+        """
+        rir = RIR.objects.first()
+        asnrange = ASNRange.objects.create(name='Range 1', slug='range-1', rir=rir, start=101, end=110)
+        url = reverse('ipam-api:asnrange-available-asns', kwargs={'pk': asnrange.pk})
+        self.add_permissions('ipam.view_asnrange', 'ipam.view_asn')
 
-        for data in data_list:
-            response = self.client.post(url, data, format='json', **self.header)
-            self.assertHttpStatus(response, status.HTTP_201_CREATED)
-            vrf = VRF.objects.get(pk=response.data['id'])
-            self.assertEqual(vrf.name, data['name'])
-            self.assertEqual(vrf.rd, data['rd'] if 'rd' in data else None)
-
-    def test_create_vrf_bulk(self):
-
-        data = [
-            {
-                'name': 'Test VRF 4',
-                'rd': '65000:4',
-            },
-            {
-                'name': 'Test VRF 5',
-                'rd': '65000:5',
-            },
-            {
-                'name': 'Test VRF 6',
-                'rd': '65000:6',
-            },
-        ]
-
-        url = reverse('ipam-api:vrf-list')
-        response = self.client.post(url, data, format='json', **self.header)
-
-        self.assertHttpStatus(response, status.HTTP_201_CREATED)
-        self.assertEqual(VRF.objects.count(), 6)
-        self.assertEqual(response.data[0]['name'], data[0]['name'])
-        self.assertEqual(response.data[1]['name'], data[1]['name'])
-        self.assertEqual(response.data[2]['name'], data[2]['name'])
-
-    def test_update_vrf(self):
-
-        data = {
-            'name': 'Test VRF X',
-            'rd': '65000:99',
-        }
-
-        url = reverse('ipam-api:vrf-detail', kwargs={'pk': self.vrf1.pk})
-        response = self.client.put(url, data, format='json', **self.header)
-
+        response = self.client.get(url, **self.header)
         self.assertHttpStatus(response, status.HTTP_200_OK)
-        self.assertEqual(VRF.objects.count(), 3)
-        vrf1 = VRF.objects.get(pk=response.data['id'])
-        self.assertEqual(vrf1.name, data['name'])
-        self.assertEqual(vrf1.rd, data['rd'])
+        self.assertEqual(len(response.data), 10)
 
-    def test_delete_vrf(self):
-
-        url = reverse('ipam-api:vrf-detail', kwargs={'pk': self.vrf1.pk})
-        response = self.client.delete(url, **self.header)
-
-        self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
-        self.assertEqual(VRF.objects.count(), 2)
-
-
-class RIRTest(APITestCase):
-
-    def setUp(self):
-
-        super().setUp()
-
-        self.rir1 = RIR.objects.create(name='Test RIR 1', slug='test-rir-1')
-        self.rir2 = RIR.objects.create(name='Test RIR 2', slug='test-rir-2')
-        self.rir3 = RIR.objects.create(name='Test RIR 3', slug='test-rir-3')
-
-    def test_get_rir(self):
-
-        url = reverse('ipam-api:rir-detail', kwargs={'pk': self.rir1.pk})
-        response = self.client.get(url, **self.header)
-
-        self.assertEqual(response.data['name'], self.rir1.name)
-
-    def test_list_rirs(self):
-
-        url = reverse('ipam-api:rir-list')
-        response = self.client.get(url, **self.header)
-
-        self.assertEqual(response.data['count'], 3)
-
-    def test_list_rirs_brief(self):
-
-        url = reverse('ipam-api:rir-list')
-        response = self.client.get('{}?brief=1'.format(url), **self.header)
-
-        self.assertEqual(
-            sorted(response.data['results'][0]),
-            ['aggregate_count', 'id', 'name', 'slug', 'url']
-        )
-
-    def test_create_rir(self):
+    def test_create_single_available_asn(self):
+        """
+        Test creation of the first available ASN within a range.
+        """
+        rir = RIR.objects.first()
+        asnrange = ASNRange.objects.create(name='Range 1', slug='range-1', rir=rir, start=101, end=110)
+        url = reverse('ipam-api:asnrange-available-asns', kwargs={'pk': asnrange.pk})
+        self.add_permissions('ipam.view_asnrange', 'ipam.add_asn')
 
         data = {
-            'name': 'Test RIR 4',
-            'slug': 'test-rir-4',
+            'description': 'New ASN'
         }
-
-        url = reverse('ipam-api:rir-list')
         response = self.client.post(url, data, format='json', **self.header)
-
         self.assertHttpStatus(response, status.HTTP_201_CREATED)
-        self.assertEqual(RIR.objects.count(), 4)
-        rir4 = RIR.objects.get(pk=response.data['id'])
-        self.assertEqual(rir4.name, data['name'])
-        self.assertEqual(rir4.slug, data['slug'])
+        self.assertEqual(response.data['rir']['id'], asnrange.rir.pk)
+        self.assertEqual(response.data['description'], data['description'])
 
-    def test_create_rir_bulk(self):
+    def test_create_multiple_available_asns(self):
+        """
+        Test the creation of several available ASNs within a parent range.
+        """
+        rir = RIR.objects.first()
+        asnrange = ASNRange.objects.create(name='Range 1', slug='range-1', rir=rir, start=101, end=110)
+        url = reverse('ipam-api:asnrange-available-asns', kwargs={'pk': asnrange.pk})
+        self.add_permissions('ipam.view_asnrange', 'ipam.add_asn')
 
+        # Try to create eleven ASNs (only ten are available)
         data = [
+            {'description': f'New ASN {i}'}
+            for i in range(1, 12)
+        ]
+        assert len(data) == 11
+        response = self.client.post(url, data, format='json', **self.header)
+        self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
+        self.assertIn('detail', response.data)
+
+        # Create all ten available ASNs in a single request
+        data.pop()
+        assert len(data) == 10
+        response = self.client.post(url, data, format='json', **self.header)
+        self.assertHttpStatus(response, status.HTTP_201_CREATED)
+        self.assertEqual(len(response.data), 10)
+
+
+class ASNTest(APIViewTestCases.APIViewTestCase):
+    model = ASN
+    brief_fields = ['asn', 'description', 'display', 'id', 'url']
+    bulk_update_data = {
+        'description': 'New description',
+    }
+
+    @classmethod
+    def setUpTestData(cls):
+        rirs = (
+            RIR(name='RIR 1', slug='rir-1', is_private=True),
+            RIR(name='RIR 2', slug='rir-2', is_private=True),
+        )
+        RIR.objects.bulk_create(rirs)
+
+        sites = (
+            Site(name='Site 1', slug='site-1'),
+            Site(name='Site 2', slug='site-2')
+        )
+        Site.objects.bulk_create(sites)
+
+        tenants = (
+            Tenant(name='Tenant 1', slug='tenant-1'),
+            Tenant(name='Tenant 2', slug='tenant-2'),
+        )
+        Tenant.objects.bulk_create(tenants)
+
+        asns = (
+            ASN(asn=65000, rir=rirs[0], tenant=tenants[0]),
+            ASN(asn=65001, rir=rirs[0], tenant=tenants[1]),
+            ASN(asn=4200000000, rir=rirs[1], tenant=tenants[0]),
+            ASN(asn=4200000001, rir=rirs[1], tenant=tenants[1]),
+        )
+        ASN.objects.bulk_create(asns)
+
+        asns[0].sites.set([sites[0]])
+        asns[1].sites.set([sites[1]])
+        asns[2].sites.set([sites[0]])
+        asns[3].sites.set([sites[1]])
+
+        cls.create_data = [
             {
-                'name': 'Test RIR 4',
-                'slug': 'test-rir-4',
+                'asn': 64512,
+                'rir': rirs[0].pk,
             },
             {
-                'name': 'Test RIR 5',
-                'slug': 'test-rir-5',
+                'asn': 65002,
+                'rir': rirs[0].pk,
             },
             {
-                'name': 'Test RIR 6',
-                'slug': 'test-rir-6',
+                'asn': 4200000002,
+                'rir': rirs[1].pk,
             },
         ]
 
-        url = reverse('ipam-api:rir-list')
-        response = self.client.post(url, data, format='json', **self.header)
 
-        self.assertHttpStatus(response, status.HTTP_201_CREATED)
-        self.assertEqual(RIR.objects.count(), 6)
-        self.assertEqual(response.data[0]['name'], data[0]['name'])
-        self.assertEqual(response.data[1]['name'], data[1]['name'])
-        self.assertEqual(response.data[2]['name'], data[2]['name'])
+class VRFTest(APIViewTestCases.APIViewTestCase):
+    model = VRF
+    brief_fields = ['description', 'display', 'id', 'name', 'prefix_count', 'rd', 'url']
+    create_data = [
+        {
+            'name': 'VRF 4',
+            'rd': '65000:4',
+        },
+        {
+            'name': 'VRF 5',
+            'rd': '65000:5',
+        },
+        {
+            'name': 'VRF 6',
+            'rd': '65000:6',
+        },
+    ]
+    bulk_update_data = {
+        'description': 'New description',
+    }
 
-    def test_update_rir(self):
+    @classmethod
+    def setUpTestData(cls):
 
-        data = {
-            'name': 'Test RIR X',
-            'slug': 'test-rir-x',
-        }
-
-        url = reverse('ipam-api:rir-detail', kwargs={'pk': self.rir1.pk})
-        response = self.client.put(url, data, format='json', **self.header)
-
-        self.assertHttpStatus(response, status.HTTP_200_OK)
-        self.assertEqual(RIR.objects.count(), 3)
-        rir1 = RIR.objects.get(pk=response.data['id'])
-        self.assertEqual(rir1.name, data['name'])
-        self.assertEqual(rir1.slug, data['slug'])
-
-    def test_delete_rir(self):
-
-        url = reverse('ipam-api:rir-detail', kwargs={'pk': self.rir1.pk})
-        response = self.client.delete(url, **self.header)
-
-        self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
-        self.assertEqual(RIR.objects.count(), 2)
-
-
-class AggregateTest(APITestCase):
-
-    def setUp(self):
-
-        super().setUp()
-
-        self.rir1 = RIR.objects.create(name='Test RIR 1', slug='test-rir-1')
-        self.rir2 = RIR.objects.create(name='Test RIR 2', slug='test-rir-2')
-        self.aggregate1 = Aggregate.objects.create(prefix=IPNetwork('10.0.0.0/8'), rir=self.rir1)
-        self.aggregate2 = Aggregate.objects.create(prefix=IPNetwork('172.16.0.0/12'), rir=self.rir1)
-        self.aggregate3 = Aggregate.objects.create(prefix=IPNetwork('192.168.0.0/16'), rir=self.rir1)
-
-    def test_get_aggregate(self):
-
-        url = reverse('ipam-api:aggregate-detail', kwargs={'pk': self.aggregate1.pk})
-        response = self.client.get(url, **self.header)
-
-        self.assertEqual(response.data['prefix'], str(self.aggregate1.prefix))
-
-    def test_list_aggregates(self):
-
-        url = reverse('ipam-api:aggregate-list')
-        response = self.client.get(url, **self.header)
-
-        self.assertEqual(response.data['count'], 3)
-
-    def test_list_aggregates_brief(self):
-
-        url = reverse('ipam-api:aggregate-list')
-        response = self.client.get('{}?brief=1'.format(url), **self.header)
-
-        self.assertEqual(
-            sorted(response.data['results'][0]),
-            ['family', 'id', 'prefix', 'url']
+        vrfs = (
+            VRF(name='VRF 1', rd='65000:1'),
+            VRF(name='VRF 2', rd='65000:2'),
+            VRF(name='VRF 3'),  # No RD
         )
+        VRF.objects.bulk_create(vrfs)
 
-    def test_create_aggregate(self):
 
-        data = {
-            'prefix': '192.0.2.0/24',
-            'rir': self.rir1.pk,
-        }
+class RouteTargetTest(APIViewTestCases.APIViewTestCase):
+    model = RouteTarget
+    brief_fields = ['description', 'display', 'id', 'name', 'url']
+    create_data = [
+        {
+            'name': '65000:1004',
+        },
+        {
+            'name': '65000:1005',
+        },
+        {
+            'name': '65000:1006',
+        },
+    ]
+    bulk_update_data = {
+        'description': 'New description',
+    }
 
-        url = reverse('ipam-api:aggregate-list')
-        response = self.client.post(url, data, format='json', **self.header)
+    @classmethod
+    def setUpTestData(cls):
 
-        self.assertHttpStatus(response, status.HTTP_201_CREATED)
-        self.assertEqual(Aggregate.objects.count(), 4)
-        aggregate4 = Aggregate.objects.get(pk=response.data['id'])
-        self.assertEqual(str(aggregate4.prefix), data['prefix'])
-        self.assertEqual(aggregate4.rir_id, data['rir'])
+        route_targets = (
+            RouteTarget(name='65000:1001'),
+            RouteTarget(name='65000:1002'),
+            RouteTarget(name='65000:1003'),
+        )
+        RouteTarget.objects.bulk_create(route_targets)
 
-    def test_create_aggregate_bulk(self):
 
-        data = [
+class RIRTest(APIViewTestCases.APIViewTestCase):
+    model = RIR
+    brief_fields = ['aggregate_count', 'description', 'display', 'id', 'name', 'slug', 'url']
+    create_data = [
+        {
+            'name': 'RIR 4',
+            'slug': 'rir-4',
+        },
+        {
+            'name': 'RIR 5',
+            'slug': 'rir-5',
+        },
+        {
+            'name': 'RIR 6',
+            'slug': 'rir-6',
+        },
+    ]
+    bulk_update_data = {
+        'description': 'New description',
+    }
+
+    @classmethod
+    def setUpTestData(cls):
+
+        rirs = (
+            RIR(name='RIR 1', slug='rir-1'),
+            RIR(name='RIR 2', slug='rir-2'),
+            RIR(name='RIR 3', slug='rir-3'),
+        )
+        RIR.objects.bulk_create(rirs)
+
+
+class AggregateTest(APIViewTestCases.APIViewTestCase):
+    model = Aggregate
+    brief_fields = ['description', 'display', 'family', 'id', 'prefix', 'url']
+    bulk_update_data = {
+        'description': 'New description',
+    }
+
+    @classmethod
+    def setUpTestData(cls):
+
+        rirs = (
+            RIR(name='RIR 1', slug='rir-1'),
+            RIR(name='RIR 2', slug='rir-2'),
+        )
+        RIR.objects.bulk_create(rirs)
+
+        aggregates = (
+            Aggregate(prefix=IPNetwork('10.0.0.0/8'), rir=rirs[0]),
+            Aggregate(prefix=IPNetwork('172.16.0.0/12'), rir=rirs[0]),
+            Aggregate(prefix=IPNetwork('192.168.0.0/16'), rir=rirs[0]),
+        )
+        Aggregate.objects.bulk_create(aggregates)
+
+        cls.create_data = [
             {
                 'prefix': '100.0.0.0/8',
-                'rir': self.rir1.pk,
+                'rir': rirs[1].pk,
             },
             {
                 'prefix': '101.0.0.0/8',
-                'rir': self.rir1.pk,
+                'rir': rirs[1].pk,
             },
             {
                 'prefix': '102.0.0.0/8',
-                'rir': self.rir1.pk,
+                'rir': rirs[1].pk,
             },
         ]
 
-        url = reverse('ipam-api:aggregate-list')
-        response = self.client.post(url, data, format='json', **self.header)
+    @tag('regression')
+    def test_graphql_aggregate_prefix_exact(self):
+        """
+        Test case to verify aggregate prefix equality via field lookup in GraphQL API.
+        """
 
-        self.assertHttpStatus(response, status.HTTP_201_CREATED)
-        self.assertEqual(Aggregate.objects.count(), 6)
-        self.assertEqual(response.data[0]['prefix'], data[0]['prefix'])
-        self.assertEqual(response.data[1]['prefix'], data[1]['prefix'])
-        self.assertEqual(response.data[2]['prefix'], data[2]['prefix'])
+        self.add_permissions('ipam.view_aggregate', 'ipam.view_rir')
 
-    def test_update_aggregate(self):
+        rir = RIR.objects.create(name='RFC6598', slug='rfc6598', is_private=True)
+        aggregate1 = Aggregate.objects.create(prefix='100.64.0.0/10', rir=rir)
+        Aggregate.objects.create(prefix='203.0.113.0/24', rir=rir)
 
-        data = {
-            'prefix': '11.0.0.0/8',
-            'rir': self.rir2.pk,
-        }
-
-        url = reverse('ipam-api:aggregate-detail', kwargs={'pk': self.aggregate1.pk})
-        response = self.client.put(url, data, format='json', **self.header)
-
+        url = reverse('graphql')
+        query = """{
+            aggregate_list(filters: { prefix: { exact: "100.64.0.0/10" } }) { prefix }
+        }"""
+        response = self.client.post(url, data={'query': query}, format='json', **self.header)
         self.assertHttpStatus(response, status.HTTP_200_OK)
-        self.assertEqual(Aggregate.objects.count(), 3)
-        aggregate1 = Aggregate.objects.get(pk=response.data['id'])
-        self.assertEqual(str(aggregate1.prefix), data['prefix'])
-        self.assertEqual(aggregate1.rir_id, data['rir'])
+        data = response.json()
+        self.assertNotIn('errors', data)
 
-    def test_delete_aggregate(self):
+        prefixes = {row['prefix'] for row in data['data']['aggregate_list']}
+        self.assertIn(str(aggregate1.prefix), prefixes)
 
-        url = reverse('ipam-api:aggregate-detail', kwargs={'pk': self.aggregate1.pk})
-        response = self.client.delete(url, **self.header)
+    @tag('regression')
+    def test_graphql_aggregate_contains_skips_invalid(self):
+        """
+        Test the GraphQL API Aggregate `contains` filter skips invalid input.
+        """
 
-        self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
-        self.assertEqual(Aggregate.objects.count(), 2)
+        self.add_permissions('ipam.view_aggregate', 'ipam.view_rir')
 
+        rir = RIR.objects.create(name='RIR 3', slug='rir-3', is_private=False)
+        aggregate1 = Aggregate.objects.create(prefix='100.64.0.0/10', rir=rir)
+        Aggregate.objects.create(prefix='203.0.113.0/24', rir=rir)
 
-class RoleTest(APITestCase):
-
-    def setUp(self):
-
-        super().setUp()
-
-        self.role1 = Role.objects.create(name='Test Role 1', slug='test-role-1')
-        self.role2 = Role.objects.create(name='Test Role 2', slug='test-role-2')
-        self.role3 = Role.objects.create(name='Test Role 3', slug='test-role-3')
-
-    def test_get_role(self):
-
-        url = reverse('ipam-api:role-detail', kwargs={'pk': self.role1.pk})
-        response = self.client.get(url, **self.header)
-
-        self.assertEqual(response.data['name'], self.role1.name)
-
-    def test_list_roles(self):
-
-        url = reverse('ipam-api:role-list')
-        response = self.client.get(url, **self.header)
-
-        self.assertEqual(response.data['count'], 3)
-
-    def test_list_roles_brief(self):
-
-        url = reverse('ipam-api:role-list')
-        response = self.client.get('{}?brief=1'.format(url), **self.header)
-
-        self.assertEqual(
-            sorted(response.data['results'][0]),
-            ['id', 'name', 'prefix_count', 'slug', 'url', 'vlan_count']
-        )
-
-    def test_create_role(self):
-
-        data = {
-            'name': 'Test Role 4',
-            'slug': 'test-role-4',
-        }
-
-        url = reverse('ipam-api:role-list')
-        response = self.client.post(url, data, format='json', **self.header)
-
-        self.assertHttpStatus(response, status.HTTP_201_CREATED)
-        self.assertEqual(Role.objects.count(), 4)
-        role4 = Role.objects.get(pk=response.data['id'])
-        self.assertEqual(role4.name, data['name'])
-        self.assertEqual(role4.slug, data['slug'])
-
-    def test_create_role_bulk(self):
-
-        data = [
-            {
-                'name': 'Test Role 4',
-                'slug': 'test-role-4',
-            },
-            {
-                'name': 'Test Role 5',
-                'slug': 'test-role-5',
-            },
-            {
-                'name': 'Test Role 6',
-                'slug': 'test-role-6',
-            },
-        ]
-
-        url = reverse('ipam-api:role-list')
-        response = self.client.post(url, data, format='json', **self.header)
-
-        self.assertHttpStatus(response, status.HTTP_201_CREATED)
-        self.assertEqual(Role.objects.count(), 6)
-        self.assertEqual(response.data[0]['name'], data[0]['name'])
-        self.assertEqual(response.data[1]['name'], data[1]['name'])
-        self.assertEqual(response.data[2]['name'], data[2]['name'])
-
-    def test_update_role(self):
-
-        data = {
-            'name': 'Test Role X',
-            'slug': 'test-role-x',
-        }
-
-        url = reverse('ipam-api:role-detail', kwargs={'pk': self.role1.pk})
-        response = self.client.put(url, data, format='json', **self.header)
-
+        url = reverse('graphql')
+        query = """{
+            aggregate_list(filters: { contains: ["100.64.16.0/24", "not-a-cidr", ""] }) { prefix }
+        }"""
+        response = self.client.post(url, data={'query': query}, format='json', **self.header)
         self.assertHttpStatus(response, status.HTTP_200_OK)
-        self.assertEqual(Role.objects.count(), 3)
-        role1 = Role.objects.get(pk=response.data['id'])
-        self.assertEqual(role1.name, data['name'])
-        self.assertEqual(role1.slug, data['slug'])
+        data = response.json()
+        self.assertNotIn('errors', data)
 
-    def test_delete_role(self):
-
-        url = reverse('ipam-api:role-detail', kwargs={'pk': self.role1.pk})
-        response = self.client.delete(url, **self.header)
-
-        self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
-        self.assertEqual(Role.objects.count(), 2)
+        prefixes = {row['prefix'] for row in data['data']['aggregate_list']}
+        self.assertIn(str(aggregate1.prefix), prefixes)
+        # No exception occurred; invalid entries were ignored
 
 
-class PrefixTest(APITestCase):
+class RoleTest(APIViewTestCases.APIViewTestCase):
+    model = Role
+    brief_fields = ['description', 'display', 'id', 'name', 'prefix_count', 'slug', 'url', 'vlan_count']
+    create_data = [
+        {
+            'name': 'Role 4',
+            'slug': 'role-4',
+        },
+        {
+            'name': 'Role 5',
+            'slug': 'role-5',
+        },
+        {
+            'name': 'Role 6',
+            'slug': 'role-6',
+        },
+    ]
+    bulk_update_data = {
+        'description': 'New description',
+    }
 
-    def setUp(self):
+    @classmethod
+    def setUpTestData(cls):
 
-        super().setUp()
-
-        self.site1 = Site.objects.create(name='Test Site 1', slug='test-site-1')
-        self.vrf1 = VRF.objects.create(name='Test VRF 1', rd='65000:1')
-        self.vlan1 = VLAN.objects.create(vid=1, name='Test VLAN 1')
-        self.role1 = Role.objects.create(name='Test Role 1', slug='test-role-1')
-        self.prefix1 = Prefix.objects.create(prefix=IPNetwork('192.168.1.0/24'))
-        self.prefix2 = Prefix.objects.create(prefix=IPNetwork('192.168.2.0/24'))
-        self.prefix3 = Prefix.objects.create(prefix=IPNetwork('192.168.3.0/24'))
-
-    def test_get_prefix(self):
-
-        url = reverse('ipam-api:prefix-detail', kwargs={'pk': self.prefix1.pk})
-        response = self.client.get(url, **self.header)
-
-        self.assertEqual(response.data['prefix'], str(self.prefix1.prefix))
-
-    def test_list_prefixes(self):
-
-        url = reverse('ipam-api:prefix-list')
-        response = self.client.get(url, **self.header)
-
-        self.assertEqual(response.data['count'], 3)
-
-    def test_list_prefixes_brief(self):
-
-        url = reverse('ipam-api:prefix-list')
-        response = self.client.get('{}?brief=1'.format(url), **self.header)
-
-        self.assertEqual(
-            sorted(response.data['results'][0]),
-            ['family', 'id', 'prefix', 'url']
+        roles = (
+            Role(name='Role 1', slug='role-1'),
+            Role(name='Role 2', slug='role-2'),
+            Role(name='Role 3', slug='role-3'),
         )
+        Role.objects.bulk_create(roles)
 
-    def test_create_prefix(self):
 
-        data = {
+class PrefixTest(APIViewTestCases.APIViewTestCase):
+    model = Prefix
+    brief_fields = ['_depth', 'description', 'display', 'family', 'id', 'prefix', 'url']
+    create_data = [
+        {
             'prefix': '192.168.4.0/24',
-            'site': self.site1.pk,
-            'vrf': self.vrf1.pk,
-            'vlan': self.vlan1.pk,
-            'role': self.role1.pk,
-        }
+        },
+        {
+            'prefix': '192.168.5.0/24',
+        },
+        {
+            'prefix': '192.168.6.0/24',
+        },
+    ]
+    bulk_update_data = {
+        'description': 'New description',
+    }
 
-        url = reverse('ipam-api:prefix-list')
-        response = self.client.post(url, data, format='json', **self.header)
+    @classmethod
+    def setUpTestData(cls):
 
-        self.assertHttpStatus(response, status.HTTP_201_CREATED)
-        self.assertEqual(Prefix.objects.count(), 4)
-        prefix4 = Prefix.objects.get(pk=response.data['id'])
-        self.assertEqual(str(prefix4.prefix), data['prefix'])
-        self.assertEqual(prefix4.site_id, data['site'])
-        self.assertEqual(prefix4.vrf_id, data['vrf'])
-        self.assertEqual(prefix4.vlan_id, data['vlan'])
-        self.assertEqual(prefix4.role_id, data['role'])
+        prefixes = (
+            Prefix(prefix=IPNetwork('192.168.1.0/24')),
+            Prefix(prefix=IPNetwork('192.168.2.0/24')),
+            Prefix(prefix=IPNetwork('192.168.3.0/24')),
+        )
+        Prefix.objects.bulk_create(prefixes)
 
-    def test_create_prefix_bulk(self):
+    @tag('regression')
+    def test_clean_validates_scope(self):
+        prefix = Prefix.objects.first()
+        site = Site.objects.create(name='Test Site', slug='test-site')
 
-        data = [
-            {
-                'prefix': '10.0.1.0/24',
-            },
-            {
-                'prefix': '10.0.2.0/24',
-            },
-            {
-                'prefix': '10.0.3.0/24',
-            },
-        ]
+        data = {'scope_type': 'dcim.site', 'scope_id': site.id}
+        url = reverse('ipam-api:prefix-detail', kwargs={'pk': prefix.pk})
+        self.add_permissions('ipam.change_prefix')
 
-        url = reverse('ipam-api:prefix-list')
-        response = self.client.post(url, data, format='json', **self.header)
-
-        self.assertHttpStatus(response, status.HTTP_201_CREATED)
-        self.assertEqual(Prefix.objects.count(), 6)
-        self.assertEqual(response.data[0]['prefix'], data[0]['prefix'])
-        self.assertEqual(response.data[1]['prefix'], data[1]['prefix'])
-        self.assertEqual(response.data[2]['prefix'], data[2]['prefix'])
-
-    def test_update_prefix(self):
-
-        data = {
-            'prefix': '192.168.99.0/24',
-            'site': self.site1.pk,
-            'vrf': self.vrf1.pk,
-            'vlan': self.vlan1.pk,
-            'role': self.role1.pk,
-        }
-
-        url = reverse('ipam-api:prefix-detail', kwargs={'pk': self.prefix1.pk})
-        response = self.client.put(url, data, format='json', **self.header)
-
+        response = self.client.patch(url, data, format='json', **self.header)
         self.assertHttpStatus(response, status.HTTP_200_OK)
-        self.assertEqual(Prefix.objects.count(), 3)
-        prefix1 = Prefix.objects.get(pk=response.data['id'])
-        self.assertEqual(str(prefix1.prefix), data['prefix'])
-        self.assertEqual(prefix1.site_id, data['site'])
-        self.assertEqual(prefix1.vrf_id, data['vrf'])
-        self.assertEqual(prefix1.vlan_id, data['vlan'])
-        self.assertEqual(prefix1.role_id, data['role'])
-
-    def test_delete_prefix(self):
-
-        url = reverse('ipam-api:prefix-detail', kwargs={'pk': self.prefix1.pk})
-        response = self.client.delete(url, **self.header)
-
-        self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
-        self.assertEqual(Prefix.objects.count(), 2)
 
     def test_list_available_prefixes(self):
-
-        prefix = Prefix.objects.create(prefix=IPNetwork('192.0.2.0/24'))
-        Prefix.objects.create(prefix=IPNetwork('192.0.2.64/26'))
-        Prefix.objects.create(prefix=IPNetwork('192.0.2.192/27'))
+        """
+        Test retrieval of all available prefixes within a parent prefix.
+        """
+        vrf = VRF.objects.create(name='VRF 1')
+        prefix = Prefix.objects.create(prefix=IPNetwork('192.0.2.0/24'), vrf=vrf)
+        Prefix.objects.create(prefix=IPNetwork('192.0.2.64/26'), vrf=vrf)
+        Prefix.objects.create(prefix=IPNetwork('192.0.2.192/27'), vrf=vrf)
         url = reverse('ipam-api:prefix-available-prefixes', kwargs={'pk': prefix.pk})
+        self.add_permissions('ipam.view_prefix')
 
         # Retrieve all available IPs
         response = self.client.get(url, **self.header)
@@ -550,10 +463,13 @@ class PrefixTest(APITestCase):
             self.assertEqual(p['prefix'], available_prefixes[i])
 
     def test_create_single_available_prefix(self):
-
-        vrf = VRF.objects.create(name='Test VRF 1', rd='1234')
+        """
+        Test retrieval of the first available prefix within a parent prefix.
+        """
+        vrf = VRF.objects.create(name='VRF 1')
         prefix = Prefix.objects.create(prefix=IPNetwork('192.0.2.0/28'), vrf=vrf, is_pool=True)
         url = reverse('ipam-api:prefix-available-prefixes', kwargs={'pk': prefix.pk})
+        self.add_permissions('ipam.view_prefix', 'ipam.add_prefix')
 
         # Create four available prefixes with individual requests
         prefixes_to_be_created = [
@@ -574,29 +490,39 @@ class PrefixTest(APITestCase):
             self.assertEqual(response.data['description'], data['description'])
 
         # Try to create one more prefix
-        response = self.client.post(url, {'prefix_length': 30}, **self.header)
-        self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
+        response = self.client.post(url, {'prefix_length': 30}, format='json', **self.header)
+        self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
         self.assertIn('detail', response.data)
 
-    def test_create_multiple_available_prefixes(self):
+        # Try to create invalid prefix type
+        response = self.client.post(url, {'prefix_length': '30'}, format='json', **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('prefix_length', response.data[0])
 
-        prefix = Prefix.objects.create(prefix=IPNetwork('192.0.2.0/28'), is_pool=True)
+    def test_create_multiple_available_prefixes(self):
+        """
+        Test the creation of available prefixes within a parent prefix.
+        """
+        vrf = VRF.objects.create(name='VRF 1')
+        prefix = Prefix.objects.create(prefix=IPNetwork('192.0.2.0/28'), vrf=vrf, is_pool=True)
         url = reverse('ipam-api:prefix-available-prefixes', kwargs={'pk': prefix.pk})
+        self.add_permissions('ipam.view_prefix', 'ipam.add_prefix')
 
         # Try to create five /30s (only four are available)
         data = [
-            {'prefix_length': 30, 'description': 'Test Prefix 1'},
-            {'prefix_length': 30, 'description': 'Test Prefix 2'},
-            {'prefix_length': 30, 'description': 'Test Prefix 3'},
-            {'prefix_length': 30, 'description': 'Test Prefix 4'},
-            {'prefix_length': 30, 'description': 'Test Prefix 5'},
+            {'prefix_length': 30, 'description': 'Prefix 1'},
+            {'prefix_length': 30, 'description': 'Prefix 2'},
+            {'prefix_length': 30, 'description': 'Prefix 3'},
+            {'prefix_length': 30, 'description': 'Prefix 4'},
+            {'prefix_length': 30, 'description': 'Prefix 5'},
         ]
         response = self.client.post(url, data, format='json', **self.header)
-        self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
+        self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
         self.assertIn('detail', response.data)
 
         # Verify that no prefixes were created (the entire /28 is still available)
         response = self.client.get(url, **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
         self.assertEqual(response.data[0]['prefix'], '192.0.2.0/28')
 
         # Create four /30s in a single request
@@ -605,12 +531,17 @@ class PrefixTest(APITestCase):
         self.assertEqual(len(response.data), 4)
 
     def test_list_available_ips(self):
-
-        prefix = Prefix.objects.create(prefix=IPNetwork('192.0.2.0/29'), is_pool=True)
+        """
+        Test retrieval of all available IP addresses within a parent prefix.
+        """
+        vrf = VRF.objects.create(name='VRF 1')
+        prefix = Prefix.objects.create(prefix=IPNetwork('192.0.2.0/29'), vrf=vrf, is_pool=True)
         url = reverse('ipam-api:prefix-available-ips', kwargs={'pk': prefix.pk})
+        self.add_permissions('ipam.view_prefix', 'ipam.view_ipaddress')
 
         # Retrieve all available IPs
         response = self.client.get(url, **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
         self.assertEqual(len(response.data), 8)  # 8 because prefix.is_pool = True
 
         # Change the prefix to not be a pool and try again
@@ -620,10 +551,13 @@ class PrefixTest(APITestCase):
         self.assertEqual(len(response.data), 6)  # 8 - 2 because prefix.is_pool = False
 
     def test_create_single_available_ip(self):
-
-        vrf = VRF.objects.create(name='Test VRF 1', rd='1234')
+        """
+        Test retrieval of the first available IP address within a parent prefix.
+        """
+        vrf = VRF.objects.create(name='VRF 1')
         prefix = Prefix.objects.create(prefix=IPNetwork('192.0.2.0/30'), vrf=vrf, is_pool=True)
         url = reverse('ipam-api:prefix-available-ips', kwargs={'pk': prefix.pk})
+        self.add_permissions('ipam.view_prefix', 'ipam.add_ipaddress')
 
         # Create all four available IPs with individual requests
         for i in range(1, 5):
@@ -636,24 +570,24 @@ class PrefixTest(APITestCase):
             self.assertEqual(response.data['description'], data['description'])
 
         # Try to create one more IP
-        response = self.client.post(url, {}, **self.header)
-        self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
+        response = self.client.post(url, {}, format='json', **self.header)
+        self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
         self.assertIn('detail', response.data)
 
     def test_create_multiple_available_ips(self):
-
-        prefix = Prefix.objects.create(prefix=IPNetwork('192.0.2.0/29'), is_pool=True)
+        """
+        Test the creation of available IP addresses within a parent prefix.
+        """
+        vrf = VRF.objects.create(name='VRF 1')
+        prefix = Prefix.objects.create(prefix=IPNetwork('192.0.2.0/29'), vrf=vrf, is_pool=True)
         url = reverse('ipam-api:prefix-available-ips', kwargs={'pk': prefix.pk})
+        self.add_permissions('ipam.view_prefix', 'ipam.add_ipaddress')
 
         # Try to create nine IPs (only eight are available)
-        data = [{'description': 'Test IP {}'.format(i)} for i in range(1, 10)]  # 9 IPs
+        data = [{'description': f'Test IP {i}'} for i in range(1, 10)]  # 9 IPs
         response = self.client.post(url, data, format='json', **self.header)
-        self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
+        self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
         self.assertIn('detail', response.data)
-
-        # Verify that no IPs were created (eight are still available)
-        response = self.client.get(url, **self.header)
-        self.assertEqual(len(response.data), 8)
 
         # Create all eight available IPs in a single request
         data = [{'description': 'Test IP {}'.format(i)} for i in range(1, 9)]  # 8 IPs
@@ -661,440 +595,885 @@ class PrefixTest(APITestCase):
         self.assertHttpStatus(response, status.HTTP_201_CREATED)
         self.assertEqual(len(response.data), 8)
 
+    def test_create_available_ip_with_mask(self):
+        """
+        Test the creation of an available IP address with a specific prefix length.
+        """
+        prefix = Prefix.objects.create(prefix=IPNetwork('192.0.2.0/24'))
+        url = reverse('ipam-api:prefix-available-ips', kwargs={'pk': prefix.pk})
+        self.add_permissions('ipam.view_prefix', 'ipam.add_ipaddress')
 
-class IPAddressTest(APITestCase):
+        # Create an available IP with a specific prefix length
+        data = {
+            'prefix_length': 32,
+            'description': 'Test IP 1',
+        }
+        response = self.client.post(url, data, format='json', **self.header)
+        self.assertHttpStatus(response, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['address'], '192.0.2.1/32')
+        self.assertEqual(response.data['description'], data['description'])
 
-    def setUp(self):
+        # Attempt to create an available IP with a prefix length less than its parent prefix
+        data = {
+            'prefix_length': 23,  # Prefix is a /24
+        }
+        response = self.client.post(url, data, format='json', **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
 
-        super().setUp()
+    @tag('regression')
+    def test_graphql_tenant_prefixes_contains_nested_skips_invalid(self):
+        """
+        Test the GraphQL API Tenant nested Prefix `contains` filter skips invalid input.
+        """
 
-        self.vrf1 = VRF.objects.create(name='Test VRF 1', rd='65000:1')
-        self.ipaddress1 = IPAddress.objects.create(address=IPNetwork('192.168.0.1/24'))
-        self.ipaddress2 = IPAddress.objects.create(address=IPNetwork('192.168.0.2/24'))
-        self.ipaddress3 = IPAddress.objects.create(address=IPNetwork('192.168.0.3/24'))
+        self.add_permissions('ipam.view_prefix', 'ipam.view_vrf', 'tenancy.view_tenant')
 
-    def test_get_ipaddress(self):
+        tenant = Tenant.objects.create(name='Tenant 1', slug='tenant-1')
+        vrf = VRF.objects.create(name='Test VRF 1', rd='64512:1')
+        Prefix.objects.create(prefix='10.20.0.0/16', vrf=vrf, tenant=tenant)
+        Prefix.objects.create(prefix='198.51.100.0/24', vrf=vrf)  # non-tenant
 
-        url = reverse('ipam-api:ipaddress-detail', kwargs={'pk': self.ipaddress1.pk})
+        url = reverse('graphql')
+        query = """{
+            tenant_list(filters: { prefixes: { contains: ["10.20.1.0/24", "not-a-cidr"] } }) { id }
+        }"""
+        response = self.client.post(url, data={'query': query}, format='json', **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        data = response.json()
+        self.assertNotIn('errors', data)
+
+        self.assertTrue(data['data']['tenant_list'])  # tenant returned
+
+
+class IPRangeTest(APIViewTestCases.APIViewTestCase):
+    model = IPRange
+    brief_fields = ['description', 'display', 'end_address', 'family', 'id', 'start_address', 'url']
+    create_data = [
+        {
+            'start_address': '192.168.4.10/24',
+            'end_address': '192.168.4.50/24',
+        },
+        {
+            'start_address': '192.168.5.10/24',
+            'end_address': '192.168.5.50/24',
+        },
+        {
+            'start_address': '192.168.6.10/24',
+            'end_address': '192.168.6.50/24',
+        },
+    ]
+    bulk_update_data = {
+        'description': 'New description',
+    }
+
+    @classmethod
+    def setUpTestData(cls):
+
+        ip_ranges = (
+            IPRange(start_address=IPNetwork('192.168.1.10/24'), end_address=IPNetwork('192.168.1.50/24'), size=51),
+            IPRange(start_address=IPNetwork('192.168.2.10/24'), end_address=IPNetwork('192.168.2.50/24'), size=51),
+            IPRange(start_address=IPNetwork('192.168.3.10/24'), end_address=IPNetwork('192.168.3.50/24'), size=51),
+        )
+        IPRange.objects.bulk_create(ip_ranges)
+
+    def test_list_available_ips(self):
+        """
+        Test retrieval of all available IP addresses within a parent IP range.
+        """
+        iprange = IPRange.objects.create(
+            start_address=IPNetwork('192.0.2.10/24'),
+            end_address=IPNetwork('192.0.2.19/24')
+        )
+        url = reverse('ipam-api:iprange-available-ips', kwargs={'pk': iprange.pk})
+        self.add_permissions('ipam.view_iprange', 'ipam.view_ipaddress')
+
+        # Retrieve all available IPs
         response = self.client.get(url, **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 10)
 
-        self.assertEqual(response.data['address'], str(self.ipaddress1.address))
+    def test_create_single_available_ip(self):
+        """
+        Test retrieval of the first available IP address within a parent IP range.
+        """
+        vrf = VRF.objects.create(name='Test VRF 1', rd='1234')
+        iprange = IPRange.objects.create(
+            start_address=IPNetwork('192.0.2.1/24'),
+            end_address=IPNetwork('192.0.2.3/24'),
+            vrf=vrf
+        )
+        url = reverse('ipam-api:iprange-available-ips', kwargs={'pk': iprange.pk})
+        self.add_permissions('ipam.view_iprange', 'ipam.add_ipaddress')
 
-    def test_list_ipaddresss(self):
+        # Create all three available IPs with individual requests
+        for i in range(1, 4):
+            data = {
+                'description': f'Test IP #{i}'
+            }
+            response = self.client.post(url, data, format='json', **self.header)
+            self.assertHttpStatus(response, status.HTTP_201_CREATED)
+            self.assertEqual(response.data['vrf']['id'], vrf.pk)
+            self.assertEqual(response.data['description'], data['description'])
 
-        url = reverse('ipam-api:ipaddress-list')
-        response = self.client.get(url, **self.header)
+        # Try to create one more IP
+        response = self.client.post(url, {}, format='json', **self.header)
+        self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
+        self.assertIn('detail', response.data)
 
-        self.assertEqual(response.data['count'], 3)
+    def test_create_multiple_available_ips(self):
+        """
+        Test the creation of available IP addresses within a parent IP range.
+        """
+        iprange = IPRange.objects.create(
+            start_address=IPNetwork('192.0.2.1/24'),
+            end_address=IPNetwork('192.0.2.8/24')
+        )
+        url = reverse('ipam-api:iprange-available-ips', kwargs={'pk': iprange.pk})
+        self.add_permissions('ipam.view_iprange', 'ipam.add_ipaddress')
 
-    def test_list_ipaddresses_brief(self):
+        # Try to create nine IPs (only eight are available)
+        data = [{'description': f'Test IP #{i}'} for i in range(1, 10)]  # 9 IPs
+        response = self.client.post(url, data, format='json', **self.header)
+        self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
+        self.assertIn('detail', response.data)
 
-        url = reverse('ipam-api:ipaddress-list')
-        response = self.client.get('{}?brief=1'.format(url), **self.header)
+        # Create all eight available IPs in a single request
+        data = [{'description': f'Test IP #{i}'} for i in range(1, 9)]  # 8 IPs
+        response = self.client.post(url, data, format='json', **self.header)
+        self.assertHttpStatus(response, status.HTTP_201_CREATED)
+        self.assertEqual(len(response.data), 8)
 
-        self.assertEqual(
-            sorted(response.data['results'][0]),
-            ['address', 'family', 'id', 'url']
+    @tag('regression')
+    def test_graphql_tenant_ip_ranges_parent_nested_skips_invalid(self):
+        """
+        Test the GraphQL API Tenant nested IP Range `parent` filter skips invalid input.
+        """
+
+        self.add_permissions('tenancy.view_tenant', 'ipam.view_iprange', 'ipam.view_vrf')
+
+        tenant = Tenant.objects.create(name='Tenant 1', slug='tenant-1')
+        vrf = VRF.objects.create(name='Test VRF 1', rd='64512:1')
+        IPRange.objects.create(
+            start_address=IPNetwork('10.30.0.1/24'), end_address=IPNetwork('10.30.0.255/24'), vrf=vrf, tenant=tenant
+        )
+        IPRange.objects.create(
+            start_address=IPNetwork('10.31.0.1/24'), end_address=IPNetwork('10.31.0.255/24'), vrf=vrf, tenant=tenant
         )
 
-    def test_create_ipaddress(self):
+        url = reverse('graphql')
+        query = """{
+            tenant_list(filters: {
+                name: { exact: "Tenant 1" }
+                ip_ranges: { parent: ["10.30.0.0/24", "bogus"] }
+            }) { id }
+        }"""
+        response = self.client.post(url, data={'query': query}, format='json', **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        data = response.json()
+        self.assertNotIn('errors', data)
+        self.assertTrue(data['data']['tenant_list'])  # tenant returned
+        # No exception occurred; invalid entries were ignored
 
-        data = {
+    @tag('regression')
+    def test_graphql_tenant_ip_ranges_contains_nested_skips_invalid(self):
+        """
+        Test the GraphQL API Tenant nested IP Range `contains` filter skips invalid input.
+        """
+
+        self.add_permissions('tenancy.view_tenant', 'ipam.view_iprange', 'ipam.view_vrf')
+
+        tenant = Tenant.objects.create(name='Tenant 2', slug='tenant-2')
+        vrf = VRF.objects.create(name='Test VRF 1', rd='64512:2')
+        IPRange.objects.create(
+            start_address=IPNetwork('10.40.0.1/24'), end_address=IPNetwork('10.40.0.255/24'), vrf=vrf, tenant=tenant
+        )
+
+        url = reverse('graphql')
+        query = """{
+            tenant_list(filters: {
+                name: { exact: "Tenant 2" }
+                ip_ranges: { contains: ["10.40.0.128/25", "###"] }
+            }) { id }
+        }"""
+        response = self.client.post(url, data={'query': query}, format='json', **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        data = response.json()
+        self.assertNotIn('errors', data)
+        self.assertTrue(data['data']['tenant_list'])  # tenant returned
+        # No exception occurred; invalid entries were ignored
+
+
+class IPAddressTest(APIViewTestCases.APIViewTestCase):
+    model = IPAddress
+    brief_fields = ['address', 'description', 'display', 'family', 'id', 'url']
+    create_data = [
+        {
             'address': '192.168.0.4/24',
-            'vrf': self.vrf1.pk,
+        },
+        {
+            'address': '192.168.0.5/24',
+        },
+        {
+            'address': '192.168.0.6/24',
+        },
+    ]
+    bulk_update_data = {
+        'description': 'New description',
+    }
+    graphql_filter = {
+        'address': {'lookup': 'i_exact', 'value': '192.168.0.1/24'},
+    }
+
+    @classmethod
+    def setUpTestData(cls):
+
+        ip_addresses = (
+            IPAddress(address=IPNetwork('192.168.0.1/24')),
+            IPAddress(address=IPNetwork('192.168.0.2/24')),
+            IPAddress(address=IPNetwork('192.168.0.3/24')),
+        )
+        IPAddress.objects.bulk_create(ip_addresses)
+
+    def test_assign_object(self):
+        """
+        Test the creation of available IP addresses within a parent IP range.
+        """
+        site = Site.objects.create(name='Site 1')
+        manufacturer = Manufacturer.objects.create(name='Manufacturer 1')
+        device_type = DeviceType.objects.create(model='Device Type 1', manufacturer=manufacturer)
+        role = DeviceRole.objects.create(name='Switch')
+        device1 = Device.objects.create(
+            name='Device 1',
+            site=site,
+            device_type=device_type,
+            role=role,
+            status='active'
+        )
+        interface1 = Interface.objects.create(name='Interface 1', device=device1, type='1000baset')
+        interface2 = Interface.objects.create(name='Interface 2', device=device1, type='1000baset')
+        device2 = Device.objects.create(
+            name='Device 2',
+            site=site,
+            device_type=device_type,
+            role=role,
+            status='active'
+        )
+        interface3 = Interface.objects.create(name='Interface 3', device=device2, type='1000baset')
+
+        ip_addresses = (
+            IPAddress(address=IPNetwork('192.168.0.4/24'), assigned_object=interface1),
+            IPAddress(address=IPNetwork('192.168.1.4/24')),
+        )
+        IPAddress.objects.bulk_create(ip_addresses)
+
+        ip1 = ip_addresses[0]
+        ip1.assigned_object = interface1
+        device1.primary_ip4 = ip_addresses[0]
+        device1.save()
+
+        url = reverse('ipam-api:ipaddress-detail', kwargs={'pk': ip1.pk})
+        self.add_permissions('ipam.change_ipaddress')
+
+        # assign to same parent
+        data = {
+            'assigned_object_id': interface2.pk
         }
+        response = self.client.patch(url, data, format='json', **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
 
-        url = reverse('ipam-api:ipaddress-list')
-        response = self.client.post(url, data, format='json', **self.header)
+        # assign to same different parent - should error
+        data = {
+            'assigned_object_id': interface3.pk
+        }
+        response = self.client.patch(url, data, format='json', **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
 
-        self.assertHttpStatus(response, status.HTTP_201_CREATED)
-        self.assertEqual(IPAddress.objects.count(), 4)
-        ipaddress4 = IPAddress.objects.get(pk=response.data['id'])
-        self.assertEqual(str(ipaddress4.address), data['address'])
-        self.assertEqual(ipaddress4.vrf_id, data['vrf'])
+    @tag('regression')
+    def test_graphql_device_primary_ip4_assigned_nested(self):
+        """
+        Test the GraphQL API Device nested IP Address `primary_ip4` filter.
+        """
 
-    def test_create_ipaddress_bulk(self):
+        self.add_permissions('dcim.view_device', 'dcim.view_interface', 'ipam.view_ipaddress')
 
-        data = [
+        site = Site.objects.create(name='Site 1')
+        manufacturer = Manufacturer.objects.create(name='Manufacturer 1')
+        device_type = DeviceType.objects.create(model='Device Type 1', manufacturer=manufacturer)
+        role = DeviceRole.objects.create(name='Switch')
+
+        device1 = Device.objects.create(name='Device 1', site=site, device_type=device_type, role=role, status='active')
+        interface1 = Interface.objects.create(name='Interface 1', device=device1, type='1000baset')
+        ip1 = IPAddress.objects.create(address='10.0.0.1/24')
+        ip1.assigned_object = interface1
+        ip1.save()
+        device1.primary_ip4 = ip1
+        device1.save()
+
+        device2 = Device.objects.create(name='Device 2', site=site, device_type=device_type, role=role, status='active')
+
+        url = reverse('graphql')
+        query = """{
+            device_list(filters: { primary_ip4: { assigned: true } }) { id name }
+        }"""
+        response = self.client.post(url, data={'query': query}, format='json', **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        data = response.json()
+        self.assertNotIn('errors', data)
+
+        ids = {row['id'] for row in data['data']['device_list']}
+        self.assertIn(str(device1.pk), ids)
+        self.assertNotIn(str(device2.pk), ids)
+
+    @tag('regression')
+    def test_graphql_device_primary_ip4_parent_nested_skips_invalid(self):
+        """
+        Test the GraphQL API Device nested IP Address `parent` filter skips invalid input.
+        """
+
+        self.add_permissions('dcim.view_device', 'dcim.view_interface', 'ipam.view_ipaddress')
+
+        site = Site.objects.create(name='Site 1')
+        manufacturer = Manufacturer.objects.create(name='Manufacturer 1')
+        device_type = DeviceType.objects.create(model='Device Type 1', manufacturer=manufacturer)
+        role = DeviceRole.objects.create(name='Switch')
+
+        device1 = Device.objects.create(name='Device 1', site=site, device_type=device_type, role=role, status='active')
+        interface1 = Interface.objects.create(name='Interface 1', device=device1, type='1000baset')
+        ip1 = IPAddress.objects.create(address='192.0.2.10/24')
+        ip1.assigned_object = interface1
+        ip1.save()
+        device1.primary_ip4 = ip1
+        device1.save()
+
+        url = reverse('graphql')
+        query = """{
+            device_list(filters: { primary_ip4: { parent: ["192.0.2.0/24", "bad-cidr"] } }) { id }
+        }"""
+        response = self.client.post(url, data={'query': query}, format='json', **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        data = response.json()
+        self.assertNotIn('errors', data)
+
+        ids = {row['id'] for row in data['data']['device_list']}
+        self.assertIn(str(device1.pk), ids)
+
+
+class FHRPGroupTest(APIViewTestCases.APIViewTestCase):
+    model = FHRPGroup
+    brief_fields = ['description', 'display', 'group_id', 'id', 'protocol', 'url']
+    bulk_update_data = {
+        'protocol': FHRPGroupProtocolChoices.PROTOCOL_GLBP,
+        'group_id': 200,
+        'auth_type': FHRPGroupAuthTypeChoices.AUTHENTICATION_MD5,
+        'auth_key': 'foobarbaz999',
+        'name': 'foobar-999',
+        'description': 'New description',
+    }
+
+    @classmethod
+    def setUpTestData(cls):
+        fhrp_groups = (
+            FHRPGroup(
+                protocol=FHRPGroupProtocolChoices.PROTOCOL_VRRP2,
+                group_id=10,
+                auth_type=FHRPGroupAuthTypeChoices.AUTHENTICATION_PLAINTEXT,
+                auth_key='foobar123',
+            ),
+            FHRPGroup(
+                protocol=FHRPGroupProtocolChoices.PROTOCOL_VRRP3,
+                group_id=20,
+                auth_type=FHRPGroupAuthTypeChoices.AUTHENTICATION_MD5,
+                auth_key='foobar123',
+            ),
+            FHRPGroup(protocol=FHRPGroupProtocolChoices.PROTOCOL_HSRP, group_id=30),
+        )
+        FHRPGroup.objects.bulk_create(fhrp_groups)
+
+        cls.create_data = [
             {
-                'address': '192.168.0.4/24',
+                'protocol': FHRPGroupProtocolChoices.PROTOCOL_VRRP2,
+                'group_id': 110,
+                'auth_type': FHRPGroupAuthTypeChoices.AUTHENTICATION_PLAINTEXT,
+                'auth_key': 'foobar123',
             },
             {
-                'address': '192.168.0.5/24',
+                'protocol': FHRPGroupProtocolChoices.PROTOCOL_VRRP3,
+                'group_id': 120,
+                'auth_type': FHRPGroupAuthTypeChoices.AUTHENTICATION_MD5,
+                'auth_key': 'barfoo456',
             },
             {
-                'address': '192.168.0.6/24',
+                'protocol': FHRPGroupProtocolChoices.PROTOCOL_GLBP,
+                'group_id': 130,
             },
         ]
 
-        url = reverse('ipam-api:ipaddress-list')
-        response = self.client.post(url, data, format='json', **self.header)
 
-        self.assertHttpStatus(response, status.HTTP_201_CREATED)
-        self.assertEqual(IPAddress.objects.count(), 6)
-        self.assertEqual(response.data[0]['address'], data[0]['address'])
-        self.assertEqual(response.data[1]['address'], data[1]['address'])
-        self.assertEqual(response.data[2]['address'], data[2]['address'])
+class FHRPGroupAssignmentTest(APIViewTestCases.APIViewTestCase):
+    model = FHRPGroupAssignment
+    brief_fields = ['display', 'group', 'id', 'interface_id', 'interface_type', 'priority', 'url']
+    bulk_update_data = {
+        'priority': 100,
+    }
+    user_permissions = ('ipam.view_fhrpgroup', )
 
-    def test_update_ipaddress(self):
+    @classmethod
+    def setUpTestData(cls):
 
-        data = {
-            'address': '192.168.0.99/24',
-            'vrf': self.vrf1.pk,
-        }
+        device1 = create_test_device('device1')
+        device2 = create_test_device('device2')
+        device3 = create_test_device('device3')
 
-        url = reverse('ipam-api:ipaddress-detail', kwargs={'pk': self.ipaddress1.pk})
-        response = self.client.put(url, data, format='json', **self.header)
+        interfaces = (
+            Interface(device=device1, name='eth0', type='other'),
+            Interface(device=device1, name='eth1', type='other'),
+            Interface(device=device1, name='eth2', type='other'),
+            Interface(device=device2, name='eth0', type='other'),
+            Interface(device=device2, name='eth1', type='other'),
+            Interface(device=device2, name='eth2', type='other'),
+            Interface(device=device3, name='eth0', type='other'),
+            Interface(device=device3, name='eth1', type='other'),
+            Interface(device=device3, name='eth2', type='other'),
+        )
+        Interface.objects.bulk_create(interfaces)
 
-        self.assertHttpStatus(response, status.HTTP_200_OK)
-        self.assertEqual(IPAddress.objects.count(), 3)
-        ipaddress1 = IPAddress.objects.get(pk=response.data['id'])
-        self.assertEqual(str(ipaddress1.address), data['address'])
-        self.assertEqual(ipaddress1.vrf_id, data['vrf'])
+        ip_addresses = (
+            IPAddress(address=IPNetwork('192.168.0.2/24'), assigned_object=interfaces[0]),
+            IPAddress(address=IPNetwork('192.168.1.2/24'), assigned_object=interfaces[1]),
+            IPAddress(address=IPNetwork('192.168.2.2/24'), assigned_object=interfaces[2]),
+            IPAddress(address=IPNetwork('192.168.0.3/24'), assigned_object=interfaces[3]),
+            IPAddress(address=IPNetwork('192.168.1.3/24'), assigned_object=interfaces[4]),
+            IPAddress(address=IPNetwork('192.168.2.3/24'), assigned_object=interfaces[5]),
+            IPAddress(address=IPNetwork('192.168.0.4/24'), assigned_object=interfaces[6]),
+            IPAddress(address=IPNetwork('192.168.1.4/24'), assigned_object=interfaces[7]),
+            IPAddress(address=IPNetwork('192.168.2.4/24'), assigned_object=interfaces[8]),
+        )
+        IPAddress.objects.bulk_create(ip_addresses)
 
-    def test_delete_ipaddress(self):
+        fhrp_groups = (
+            FHRPGroup(protocol=FHRPGroupProtocolChoices.PROTOCOL_VRRP2, group_id=10),
+            FHRPGroup(protocol=FHRPGroupProtocolChoices.PROTOCOL_VRRP2, group_id=20),
+            FHRPGroup(protocol=FHRPGroupProtocolChoices.PROTOCOL_VRRP2, group_id=30),
+        )
+        FHRPGroup.objects.bulk_create(fhrp_groups)
 
-        url = reverse('ipam-api:ipaddress-detail', kwargs={'pk': self.ipaddress1.pk})
-        response = self.client.delete(url, **self.header)
+        fhrp_group_assignments = (
+            FHRPGroupAssignment(group=fhrp_groups[0], interface=interfaces[0], priority=10),
+            FHRPGroupAssignment(group=fhrp_groups[1], interface=interfaces[1], priority=10),
+            FHRPGroupAssignment(group=fhrp_groups[2], interface=interfaces[2], priority=10),
+            FHRPGroupAssignment(group=fhrp_groups[0], interface=interfaces[3], priority=20),
+            FHRPGroupAssignment(group=fhrp_groups[1], interface=interfaces[4], priority=20),
+            FHRPGroupAssignment(group=fhrp_groups[2], interface=interfaces[5], priority=20),
+        )
+        FHRPGroupAssignment.objects.bulk_create(fhrp_group_assignments)
 
-        self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
-        self.assertEqual(IPAddress.objects.count(), 2)
+        cls.create_data = [
+            {
+                'group': fhrp_groups[0].pk,
+                'interface_type': 'dcim.interface',
+                'interface_id': interfaces[6].pk,
+                'priority': 30,
+            },
+            {
+                'group': fhrp_groups[1].pk,
+                'interface_type': 'dcim.interface',
+                'interface_id': interfaces[7].pk,
+                'priority': 30,
+            },
+            {
+                'group': fhrp_groups[2].pk,
+                'interface_type': 'dcim.interface',
+                'interface_id': interfaces[8].pk,
+                'priority': 30,
+            },
+        ]
 
 
-class VLANGroupTest(APITestCase):
+class VLANGroupTest(APIViewTestCases.APIViewTestCase):
+    model = VLANGroup
+    brief_fields = ['description', 'display', 'id', 'name', 'slug', 'url', 'vlan_count']
+    create_data = [
+        {
+            'name': 'VLAN Group 4',
+            'slug': 'vlan-group-4',
+            'vid_ranges': [[1, 4094]]
+        },
+        {
+            'name': 'VLAN Group 5',
+            'slug': 'vlan-group-5',
+            'vid_ranges': [[1, 4094]]
+        },
+        {
+            'name': 'VLAN Group 6',
+            'slug': 'vlan-group-6',
+            'vid_ranges': [[1, 4094]]
+        },
+    ]
+    bulk_update_data = {
+        'description': 'New description',
+    }
 
-    def setUp(self):
+    @classmethod
+    def setUpTestData(cls):
 
-        super().setUp()
+        vlan_groups = (
+            VLANGroup(name='VLAN Group 1', slug='vlan-group-1'),
+            VLANGroup(name='VLAN Group 2', slug='vlan-group-2'),
+            VLANGroup(name='VLAN Group 3', slug='vlan-group-3'),
+        )
+        VLANGroup.objects.bulk_create(vlan_groups)
 
-        self.vlangroup1 = VLANGroup.objects.create(name='Test VLAN Group 1', slug='test-vlan-group-1')
-        self.vlangroup2 = VLANGroup.objects.create(name='Test VLAN Group 2', slug='test-vlan-group-2')
-        self.vlangroup3 = VLANGroup.objects.create(name='Test VLAN Group 3', slug='test-vlan-group-3')
+    def test_list_available_vlans(self):
+        """
+        Test retrieval of all available VLANs within a group.
+        """
+        MIN_VID = 100
+        MAX_VID = 199
 
-    def test_get_vlangroup(self):
-
-        url = reverse('ipam-api:vlangroup-detail', kwargs={'pk': self.vlangroup1.pk})
-        response = self.client.get(url, **self.header)
-
-        self.assertEqual(response.data['name'], self.vlangroup1.name)
-
-    def test_list_vlangroups(self):
-
-        url = reverse('ipam-api:vlangroup-list')
-        response = self.client.get(url, **self.header)
-
-        self.assertEqual(response.data['count'], 3)
-
-    def test_list_vlangroups_brief(self):
-
-        url = reverse('ipam-api:vlangroup-list')
-        response = self.client.get('{}?brief=1'.format(url), **self.header)
-
-        self.assertEqual(
-            sorted(response.data['results'][0]),
-            ['id', 'name', 'slug', 'url', 'vlan_count']
+        self.add_permissions('ipam.view_vlangroup', 'ipam.view_vlan')
+        vlangroup = VLANGroup.objects.create(
+            name='VLAN Group X',
+            slug='vlan-group-x',
+            vid_ranges=string_to_ranges(f"{MIN_VID}-{MAX_VID}")
         )
 
-    def test_create_vlangroup(self):
+        # Create a set of VLANs within the group
+        vlans = (
+            VLAN(vid=10, name='VLAN 10', group=vlangroup),
+            VLAN(vid=20, name='VLAN 20', group=vlangroup),
+            VLAN(vid=30, name='VLAN 30', group=vlangroup),
+        )
+        VLAN.objects.bulk_create(vlans)
+
+        # Retrieve all available VLANs
+        url = reverse('ipam-api:vlangroup-available-vlans', kwargs={'pk': vlangroup.pk})
+        response = self.client.get(f'{url}?limit=0', **self.header)
+        self.assertEqual(len(response.data), MAX_VID - MIN_VID + 1)
+        available_vlans = {vlan['vid'] for vlan in response.data}
+        for vlan in vlans:
+            self.assertNotIn(vlan.vid, available_vlans)
+
+        # Retrieve a maximum number of available VLANs
+        url = reverse('ipam-api:vlangroup-available-vlans', kwargs={'pk': vlangroup.pk})
+        response = self.client.get(f'{url}?limit=10', **self.header)
+        self.assertEqual(len(response.data), 10)
+
+    def test_create_single_available_vlan(self):
+        """
+        Test the creation of a single available VLAN.
+        """
+        self.add_permissions('ipam.view_vlangroup', 'ipam.view_vlan', 'ipam.add_vlan')
+        vlangroup = VLANGroup.objects.first()
+        VLAN.objects.create(vid=1, name='VLAN 1', group=vlangroup)
 
         data = {
-            'name': 'Test VLAN Group 4',
-            'slug': 'test-vlan-group-4',
+            "name": "First VLAN",
         }
-
-        url = reverse('ipam-api:vlangroup-list')
+        url = reverse('ipam-api:vlangroup-available-vlans', kwargs={'pk': vlangroup.pk})
         response = self.client.post(url, data, format='json', **self.header)
 
         self.assertHttpStatus(response, status.HTTP_201_CREATED)
-        self.assertEqual(VLANGroup.objects.count(), 4)
-        vlangroup4 = VLANGroup.objects.get(pk=response.data['id'])
-        self.assertEqual(vlangroup4.name, data['name'])
-        self.assertEqual(vlangroup4.slug, data['slug'])
+        self.assertEqual(response.data['name'], data['name'])
+        self.assertEqual(response.data['group']['id'], vlangroup.pk)
+        self.assertEqual(response.data['vid'], 2)
 
-    def test_create_vlangroup_bulk(self):
+    def test_create_multiple_available_vlans(self):
+        """
+        Test the creation of multiple available VLANs.
+        """
+        self.add_permissions('ipam.view_vlangroup', 'ipam.view_vlan', 'ipam.add_vlan')
+        vlangroup = VLANGroup.objects.first()
 
-        data = [
-            {
-                'name': 'Test VLAN Group 4',
-                'slug': 'test-vlan-group-4',
-            },
-            {
-                'name': 'Test VLAN Group 5',
-                'slug': 'test-vlan-group-5',
-            },
-            {
-                'name': 'Test VLAN Group 6',
-                'slug': 'test-vlan-group-6',
-            },
-        ]
+        vlans = (
+            VLAN(vid=1, name='VLAN 1', group=vlangroup),
+            VLAN(vid=3, name='VLAN 3', group=vlangroup),
+            VLAN(vid=5, name='VLAN 5', group=vlangroup),
+        )
+        VLAN.objects.bulk_create(vlans)
 
-        url = reverse('ipam-api:vlangroup-list')
+        data = (
+            {"name": "First VLAN"},
+            {"name": "Second VLAN"},
+            {"name": "Third VLAN"},
+        )
+        url = reverse('ipam-api:vlangroup-available-vlans', kwargs={'pk': vlangroup.pk})
         response = self.client.post(url, data, format='json', **self.header)
 
         self.assertHttpStatus(response, status.HTTP_201_CREATED)
-        self.assertEqual(VLANGroup.objects.count(), 6)
+        self.assertEqual(len(response.data), 3)
         self.assertEqual(response.data[0]['name'], data[0]['name'])
+        self.assertEqual(response.data[0]['group']['id'], vlangroup.pk)
+        self.assertEqual(response.data[0]['vid'], 2)
         self.assertEqual(response.data[1]['name'], data[1]['name'])
+        self.assertEqual(response.data[1]['group']['id'], vlangroup.pk)
+        self.assertEqual(response.data[1]['vid'], 4)
         self.assertEqual(response.data[2]['name'], data[2]['name'])
-
-    def test_update_vlangroup(self):
-
-        data = {
-            'name': 'Test VLAN Group X',
-            'slug': 'test-vlan-group-x',
-        }
-
-        url = reverse('ipam-api:vlangroup-detail', kwargs={'pk': self.vlangroup1.pk})
-        response = self.client.put(url, data, format='json', **self.header)
-
-        self.assertHttpStatus(response, status.HTTP_200_OK)
-        self.assertEqual(VLANGroup.objects.count(), 3)
-        vlangroup1 = VLANGroup.objects.get(pk=response.data['id'])
-        self.assertEqual(vlangroup1.name, data['name'])
-        self.assertEqual(vlangroup1.slug, data['slug'])
-
-    def test_delete_vlangroup(self):
-
-        url = reverse('ipam-api:vlangroup-detail', kwargs={'pk': self.vlangroup1.pk})
-        response = self.client.delete(url, **self.header)
-
-        self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
-        self.assertEqual(VLANGroup.objects.count(), 2)
+        self.assertEqual(response.data[2]['group']['id'], vlangroup.pk)
+        self.assertEqual(response.data[2]['vid'], 6)
 
 
-class VLANTest(APITestCase):
+class VLANTest(APIViewTestCases.APIViewTestCase):
+    model = VLAN
+    brief_fields = ['description', 'display', 'id', 'name', 'url', 'vid']
+    bulk_update_data = {
+        'description': 'New description',
+    }
 
-    def setUp(self):
+    @classmethod
+    def setUpTestData(cls):
 
-        super().setUp()
-
-        self.vlan1 = VLAN.objects.create(vid=1, name='Test VLAN 1')
-        self.vlan2 = VLAN.objects.create(vid=2, name='Test VLAN 2')
-        self.vlan3 = VLAN.objects.create(vid=3, name='Test VLAN 3')
-
-        self.prefix1 = Prefix.objects.create(prefix=IPNetwork('192.168.1.0/24'))
-
-    def test_get_vlan(self):
-
-        url = reverse('ipam-api:vlan-detail', kwargs={'pk': self.vlan1.pk})
-        response = self.client.get(url, **self.header)
-
-        self.assertEqual(response.data['name'], self.vlan1.name)
-
-    def test_list_vlans(self):
-
-        url = reverse('ipam-api:vlan-list')
-        response = self.client.get(url, **self.header)
-
-        self.assertEqual(response.data['count'], 3)
-
-    def test_list_vlans_brief(self):
-
-        url = reverse('ipam-api:vlan-list')
-        response = self.client.get('{}?brief=1'.format(url), **self.header)
-
-        self.assertEqual(
-            sorted(response.data['results'][0]),
-            ['display_name', 'id', 'name', 'url', 'vid']
+        vlan_groups = (
+            VLANGroup(name='VLAN Group 1', slug='vlan-group-1'),
+            VLANGroup(name='VLAN Group 2', slug='vlan-group-2'),
         )
+        VLANGroup.objects.bulk_create(vlan_groups)
 
-    def test_create_vlan(self):
+        vlans = (
+            VLAN(name='VLAN 1', vid=1, group=vlan_groups[0]),
+            VLAN(name='VLAN 2', vid=2, group=vlan_groups[0]),
+            VLAN(name='VLAN 3', vid=3, group=vlan_groups[0]),
+            VLAN(name='SVLAN 1', vid=1001, qinq_role=VLANQinQRoleChoices.ROLE_SERVICE),
+        )
+        VLAN.objects.bulk_create(vlans)
 
-        data = {
-            'vid': 4,
-            'name': 'Test VLAN 4',
-        }
-
-        url = reverse('ipam-api:vlan-list')
-        response = self.client.post(url, data, format='json', **self.header)
-
-        self.assertHttpStatus(response, status.HTTP_201_CREATED)
-        self.assertEqual(VLAN.objects.count(), 4)
-        vlan4 = VLAN.objects.get(pk=response.data['id'])
-        self.assertEqual(vlan4.vid, data['vid'])
-        self.assertEqual(vlan4.name, data['name'])
-
-    def test_create_vlan_bulk(self):
-
-        data = [
+        cls.create_data = [
             {
                 'vid': 4,
-                'name': 'Test VLAN 4',
+                'name': 'VLAN 4',
+                'group': vlan_groups[1].pk,
             },
             {
                 'vid': 5,
-                'name': 'Test VLAN 5',
+                'name': 'VLAN 5',
+                'group': vlan_groups[1].pk,
             },
             {
                 'vid': 6,
-                'name': 'Test VLAN 6',
+                'name': 'VLAN 6',
+                'group': vlan_groups[1].pk,
+            },
+            {
+                'vid': 2001,
+                'name': 'CVLAN 1',
+                'qinq_role': VLANQinQRoleChoices.ROLE_CUSTOMER,
+                'qinq_svlan': vlans[3].pk,
             },
         ]
 
-        url = reverse('ipam-api:vlan-list')
-        response = self.client.post(url, data, format='json', **self.header)
-
-        self.assertHttpStatus(response, status.HTTP_201_CREATED)
-        self.assertEqual(VLAN.objects.count(), 6)
-        self.assertEqual(response.data[0]['name'], data[0]['name'])
-        self.assertEqual(response.data[1]['name'], data[1]['name'])
-        self.assertEqual(response.data[2]['name'], data[2]['name'])
-
-    def test_update_vlan(self):
-
-        data = {
-            'vid': 99,
-            'name': 'Test VLAN X',
-        }
-
-        url = reverse('ipam-api:vlan-detail', kwargs={'pk': self.vlan1.pk})
-        response = self.client.put(url, data, format='json', **self.header)
-
-        self.assertHttpStatus(response, status.HTTP_200_OK)
-        self.assertEqual(VLAN.objects.count(), 3)
-        vlan1 = VLAN.objects.get(pk=response.data['id'])
-        self.assertEqual(vlan1.vid, data['vid'])
-        self.assertEqual(vlan1.name, data['name'])
-
-    def test_delete_vlan(self):
-
-        url = reverse('ipam-api:vlan-detail', kwargs={'pk': self.vlan1.pk})
-        response = self.client.delete(url, **self.header)
-
-        self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
-        self.assertEqual(VLAN.objects.count(), 2)
-
     def test_delete_vlan_with_prefix(self):
-        self.prefix1.vlan = self.vlan1
-        self.prefix1.save()
+        """
+        Attempt and fail to delete a VLAN with a Prefix assigned to it.
+        """
+        vlan = VLAN.objects.first()
+        Prefix.objects.create(prefix=IPNetwork('192.0.2.0/24'), vlan=vlan)
 
-        url = reverse('ipam-api:vlan-detail', kwargs={'pk': self.vlan1.pk})
-        response = self.client.delete(url, **self.header)
+        self.add_permissions('ipam.delete_vlan')
+        url = reverse('ipam-api:vlan-detail', kwargs={'pk': vlan.pk})
+        with disable_logging(level=logging.WARNING):
+            response = self.client.delete(url, **self.header)
 
-        # can't use assertHttpStatus here because we don't have response.data
-        self.assertEqual(response.status_code, 409)
+        self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
 
         content = json.loads(response.content.decode('utf-8'))
         self.assertIn('detail', content)
         self.assertTrue(content['detail'].startswith('Unable to delete object.'))
 
 
-class ServiceTest(APITestCase):
+class VLANTranslationPolicyTest(APIViewTestCases.APIViewTestCase):
+    model = VLANTranslationPolicy
+    brief_fields = ['description', 'display', 'id', 'name', 'url',]
+    bulk_update_data = {
+        'description': 'New description',
+    }
 
-    def setUp(self):
+    @classmethod
+    def setUpTestData(cls):
 
-        super().setUp()
-
-        site = Site.objects.create(name='Test Site 1', slug='test-site-1')
-        manufacturer = Manufacturer.objects.create(name='Test Manufacturer 1', slug='test-manufacturer-1')
-        devicetype = DeviceType.objects.create(manufacturer=manufacturer, model='Test Device Type 1')
-        devicerole = DeviceRole.objects.create(name='Test Device Role 1', slug='test-device-role-1')
-        self.device1 = Device.objects.create(
-            name='Test Device 1', site=site, device_type=devicetype, device_role=devicerole
+        vlan_translation_policies = (
+            VLANTranslationPolicy(
+                name='Policy 1',
+                description='foobar1',
+            ),
+            VLANTranslationPolicy(
+                name='Policy 2',
+                description='foobar2',
+            ),
+            VLANTranslationPolicy(
+                name='Policy 3',
+                description='foobar3',
+            ),
         )
-        self.device2 = Device.objects.create(
-            name='Test Device 2', site=site, device_type=devicetype, device_role=devicerole
-        )
-        self.service1 = Service.objects.create(
-            device=self.device1, name='Test Service 1', protocol=IP_PROTOCOL_TCP, port=1
-        )
-        self.service1 = Service.objects.create(
-            device=self.device1, name='Test Service 2', protocol=IP_PROTOCOL_TCP, port=2
-        )
-        self.service1 = Service.objects.create(
-            device=self.device1, name='Test Service 3', protocol=IP_PROTOCOL_TCP, port=3
-        )
+        VLANTranslationPolicy.objects.bulk_create(vlan_translation_policies)
 
-    def test_get_service(self):
-
-        url = reverse('ipam-api:service-detail', kwargs={'pk': self.service1.pk})
-        response = self.client.get(url, **self.header)
-
-        self.assertEqual(response.data['name'], self.service1.name)
-
-    def test_list_services(self):
-
-        url = reverse('ipam-api:service-list')
-        response = self.client.get(url, **self.header)
-
-        self.assertEqual(response.data['count'], 3)
-
-    def test_create_service(self):
-
-        data = {
-            'device': self.device1.pk,
-            'name': 'Test Service 4',
-            'protocol': IP_PROTOCOL_TCP,
-            'port': 4,
-        }
-
-        url = reverse('ipam-api:service-list')
-        response = self.client.post(url, data, format='json', **self.header)
-
-        self.assertHttpStatus(response, status.HTTP_201_CREATED)
-        self.assertEqual(Service.objects.count(), 4)
-        service4 = Service.objects.get(pk=response.data['id'])
-        self.assertEqual(service4.device_id, data['device'])
-        self.assertEqual(service4.name, data['name'])
-        self.assertEqual(service4.protocol, data['protocol'])
-        self.assertEqual(service4.port, data['port'])
-
-    def test_create_service_bulk(self):
-
-        data = [
+        cls.create_data = [
             {
-                'device': self.device1.pk,
-                'name': 'Test Service 4',
-                'protocol': IP_PROTOCOL_TCP,
-                'port': 4,
+                'name': 'Policy 4',
+                'description': 'foobar4',
             },
             {
-                'device': self.device1.pk,
-                'name': 'Test Service 5',
-                'protocol': IP_PROTOCOL_TCP,
-                'port': 5,
+                'name': 'Policy 5',
+                'description': 'foobar5',
             },
             {
-                'device': self.device1.pk,
-                'name': 'Test Service 6',
-                'protocol': IP_PROTOCOL_TCP,
-                'port': 6,
+                'name': 'Policy 6',
+                'description': 'foobar6',
             },
         ]
 
-        url = reverse('ipam-api:service-list')
-        response = self.client.post(url, data, format='json', **self.header)
 
-        self.assertHttpStatus(response, status.HTTP_201_CREATED)
-        self.assertEqual(Service.objects.count(), 6)
-        self.assertEqual(response.data[0]['name'], data[0]['name'])
-        self.assertEqual(response.data[1]['name'], data[1]['name'])
-        self.assertEqual(response.data[2]['name'], data[2]['name'])
+class VLANTranslationRuleTest(APIViewTestCases.APIViewTestCase):
+    model = VLANTranslationRule
+    brief_fields = ['description', 'display', 'id', 'local_vid', 'policy', 'remote_vid', 'url']
 
-    def test_update_service(self):
+    @classmethod
+    def setUpTestData(cls):
 
-        data = {
-            'device': self.device2.pk,
-            'name': 'Test Service X',
-            'protocol': IP_PROTOCOL_UDP,
-            'port': 99,
+        vlan_translation_policies = (
+            VLANTranslationPolicy(
+                name='Policy 1',
+                description='foobar1',
+            ),
+            VLANTranslationPolicy(
+                name='Policy 2',
+                description='foobar2',
+            ),
+            VLANTranslationPolicy(
+                name='Policy 3',
+                description='foobar2',
+            ),
+        )
+        VLANTranslationPolicy.objects.bulk_create(vlan_translation_policies)
+
+        vlan_translation_rules = (
+            VLANTranslationRule(
+                policy=vlan_translation_policies[0],
+                local_vid=100,
+                remote_vid=200,
+                description='foo',
+            ),
+            VLANTranslationRule(
+                policy=vlan_translation_policies[0],
+                local_vid=101,
+                remote_vid=201,
+                description='bar',
+            ),
+            VLANTranslationRule(
+                policy=vlan_translation_policies[1],
+                local_vid=102,
+                remote_vid=202,
+                description='baz',
+            ),
+        )
+        VLANTranslationRule.objects.bulk_create(vlan_translation_rules)
+
+        cls.create_data = [
+            {
+                'policy': vlan_translation_policies[0].pk,
+                'local_vid': 300,
+                'remote_vid': 400,
+            },
+            {
+                'policy': vlan_translation_policies[0].pk,
+                'local_vid': 301,
+                'remote_vid': 401,
+            },
+            {
+                'policy': vlan_translation_policies[1].pk,
+                'local_vid': 302,
+                'remote_vid': 402,
+            },
+        ]
+
+        cls.bulk_update_data = {
+            'policy': vlan_translation_policies[2].pk,
+            'description': 'New description',
         }
 
-        url = reverse('ipam-api:service-detail', kwargs={'pk': self.service1.pk})
-        response = self.client.put(url, data, format='json', **self.header)
 
-        self.assertHttpStatus(response, status.HTTP_200_OK)
-        self.assertEqual(Service.objects.count(), 3)
-        service1 = Service.objects.get(pk=response.data['id'])
-        self.assertEqual(service1.device_id, data['device'])
-        self.assertEqual(service1.name, data['name'])
-        self.assertEqual(service1.protocol, data['protocol'])
-        self.assertEqual(service1.port, data['port'])
+class ServiceTemplateTest(APIViewTestCases.APIViewTestCase):
+    model = ServiceTemplate
+    brief_fields = ['description', 'display', 'id', 'name', 'ports', 'protocol', 'url']
+    bulk_update_data = {
+        'description': 'New description',
+    }
+    graphql_base_name = 'service_template'
 
-    def test_delete_service(self):
+    @classmethod
+    def setUpTestData(cls):
+        service_templates = (
+            ServiceTemplate(name='Service Template 1', protocol=ServiceProtocolChoices.PROTOCOL_TCP, ports=[1, 2]),
+            ServiceTemplate(name='Service Template 2', protocol=ServiceProtocolChoices.PROTOCOL_TCP, ports=[3, 4]),
+            ServiceTemplate(name='Service Template 3', protocol=ServiceProtocolChoices.PROTOCOL_TCP, ports=[5, 6]),
+        )
+        ServiceTemplate.objects.bulk_create(service_templates)
 
-        url = reverse('ipam-api:service-detail', kwargs={'pk': self.service1.pk})
-        response = self.client.delete(url, **self.header)
+        cls.create_data = [
+            {
+                'name': 'Service Template 4',
+                'protocol': ServiceProtocolChoices.PROTOCOL_TCP,
+                'ports': [7, 8],
+            },
+            {
+                'name': 'Service Template 5',
+                'protocol': ServiceProtocolChoices.PROTOCOL_TCP,
+                'ports': [9, 10],
+            },
+            {
+                'name': 'Service Template 6',
+                'protocol': ServiceProtocolChoices.PROTOCOL_TCP,
+                'ports': [11, 12],
+            },
+        ]
 
-        self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
-        self.assertEqual(Service.objects.count(), 2)
+
+class ServiceTest(APIViewTestCases.APIViewTestCase):
+    model = Service
+    brief_fields = ['description', 'display', 'id', 'name', 'ports', 'protocol', 'url']
+    bulk_update_data = {
+        'description': 'New description',
+    }
+    graphql_base_name = 'service'
+
+    @classmethod
+    def setUpTestData(cls):
+        site = Site.objects.create(name='Site 1', slug='site-1')
+        manufacturer = Manufacturer.objects.create(name='Manufacturer 1', slug='manufacturer-1')
+        devicetype = DeviceType.objects.create(manufacturer=manufacturer, model='Device Type 1')
+        role = DeviceRole.objects.create(name='Device Role 1', slug='device-role-1')
+
+        devices = (
+            Device(name='Device 1', site=site, device_type=devicetype, role=role),
+            Device(name='Device 2', site=site, device_type=devicetype, role=role),
+        )
+        Device.objects.bulk_create(devices)
+
+        services = (
+            Service(parent=devices[0], name='Service 1', protocol=ServiceProtocolChoices.PROTOCOL_TCP, ports=[1]),
+            Service(parent=devices[0], name='Service 2', protocol=ServiceProtocolChoices.PROTOCOL_TCP, ports=[2]),
+            Service(parent=devices[0], name='Service 3', protocol=ServiceProtocolChoices.PROTOCOL_TCP, ports=[3]),
+        )
+        Service.objects.bulk_create(services)
+
+        cls.create_data = [
+            {
+                'parent_object_id': devices[1].pk,
+                'parent_object_type': 'dcim.device',
+                'name': 'Service 4',
+                'protocol': ServiceProtocolChoices.PROTOCOL_TCP,
+                'ports': [4],
+            },
+            {
+                'parent_object_id': devices[1].pk,
+                'parent_object_type': 'dcim.device',
+                'name': 'Service 5',
+                'protocol': ServiceProtocolChoices.PROTOCOL_TCP,
+                'ports': [5],
+            },
+            {
+                'parent_object_id': devices[1].pk,
+                'parent_object_type': 'dcim.device',
+                'name': 'Service 6',
+                'protocol': ServiceProtocolChoices.PROTOCOL_TCP,
+                'ports': [6],
+            },
+        ]

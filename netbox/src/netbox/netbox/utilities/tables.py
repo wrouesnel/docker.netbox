@@ -1,58 +1,79 @@
-import django_tables2 as tables
-from django.utils.safestring import mark_safe
+from django.apps import apps
+from django.db.models import Q
+from django.utils.module_loading import import_string
+from django.utils.translation import gettext_lazy as _
+
+from core.models import ObjectType
+from netbox.registry import registry
+
+__all__ = (
+    'get_table_configs',
+    'get_table_for_model',
+    'get_table_ordering',
+    'linkify_phone',
+    'register_table_column'
+)
 
 
-class BaseTable(tables.Table):
+def get_table_configs(table, user):
     """
-    Default table for object lists
+    Return any available TableConfigs applicable to the given table & user.
     """
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        # Set default empty_text if none was provided
-        if self.empty_text is None:
-            self.empty_text = 'No {} found'.format(self._meta.model._meta.verbose_name_plural)
-
-    class Meta:
-        attrs = {
-            'class': 'table table-hover table-headings',
-        }
+    TableConfig = apps.get_model('extras', 'TableConfig')
+    return TableConfig.objects.filter(
+        Q(shared=True) | Q(user=user if user.is_authenticated else None),
+        object_type=ObjectType.objects.get_for_model(table.Meta.model),
+        table=table.name,
+        enabled=True,
+    )
 
 
-class ToggleColumn(tables.CheckBoxColumn):
+def get_table_for_model(model, name=None):
+    name = name or f'{model.__name__}Table'
+    try:
+        return import_string(f'{model._meta.app_label}.tables.{name}')
+    except ImportError:
+        return None
+
+
+def get_table_ordering(request, table):
     """
-    Extend CheckBoxColumn to add a "toggle all" checkbox in the column header.
+    Given a request, return the prescribed table ordering, if any.
+    This may be necessary to determine before rendering the table itself.
     """
-    def __init__(self, *args, **kwargs):
-        default = kwargs.pop('default', '')
-        visible = kwargs.pop('visible', False)
-        super().__init__(*args, default=default, visible=visible, **kwargs)
+    # Check for an explicit ordering
+    if 'sort' in request.GET:
+        return request.GET['sort'] or None
 
-    @property
-    def header(self):
-        return mark_safe('<input type="checkbox" class="toggle" title="Toggle all" />')
-
-
-class BooleanColumn(tables.Column):
-    """
-    Custom implementation of BooleanColumn to render a nicely-formatted checkmark or X icon instead of a Unicode
-    character.
-    """
-    def render(self, value):
-        if value is True:
-            rendered = '<span class="text-success"><i class="fa fa-check"></i></span>'
-        elif value is False:
-            rendered = '<span class="text-danger"><i class="fa fa-close"></i></span>'
-        else:
-            rendered = '<span class="text-muted">&mdash;</span>'
-        return mark_safe(rendered)
+    # Check for a configured preference
+    if request.user.is_authenticated:
+        if preference := request.user.config.get(f'tables.{table.__name__}.ordering'):
+            return preference
+    return None
 
 
-class ColorColumn(tables.Column):
+def linkify_phone(value):
     """
-    Display a color (#RRGGBB).
+    Render a telephone number as a hyperlink.
     """
-    def render(self, value):
-        return mark_safe(
-            '<span class="label color-block" style="background-color: #{}">&nbsp;</span>'.format(value)
-        )
+    if value is None:
+        return None
+    return f"tel:{value.replace(' ', '')}"
+
+
+def register_table_column(column, name, *tables):
+    """
+    Register a custom column for use on one or more tables.
+
+    Args:
+        column: The column instance to register
+        name: The name of the table column
+        tables: One or more table classes
+    """
+    for table in tables:
+        reg = registry['tables'][table]
+        if name in reg:
+            raise ValueError(_("A column named {name} is already defined for table {table_name}").format(
+                name=name, table_name=table.__name__
+            ))
+        reg[name] = column

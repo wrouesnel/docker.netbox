@@ -1,66 +1,56 @@
-from django.db.models import Count
+from django.db.models import Sum
+from rest_framework.routers import APIRootView
 
-from dcim.models import Device, Interface
-from extras.api.views import CustomFieldModelViewSet
-from utilities.api import FieldChoicesViewSet, ModelViewSet
-from utilities.utils import get_subquery
-from virtualization import filters
-from virtualization.models import Cluster, ClusterGroup, ClusterType, VirtualMachine
+from extras.api.mixins import ConfigContextQuerySetMixin, RenderConfigMixin
+from netbox.api.viewsets import NetBoxModelViewSet
+from utilities.query_functions import CollateAsChar
+from virtualization import filtersets
+from virtualization.models import *
+
 from . import serializers
 
 
-#
-# Field choices
-#
-
-class VirtualizationFieldChoicesViewSet(FieldChoicesViewSet):
-    fields = (
-        (VirtualMachine, ['status']),
-    )
+class VirtualizationRootView(APIRootView):
+    """
+    Virtualization API root view
+    """
+    def get_view_name(self):
+        return 'Virtualization'
 
 
 #
 # Clusters
 #
 
-class ClusterTypeViewSet(ModelViewSet):
-    queryset = ClusterType.objects.annotate(
-        cluster_count=Count('clusters')
-    )
+class ClusterTypeViewSet(NetBoxModelViewSet):
+    queryset = ClusterType.objects.all()
     serializer_class = serializers.ClusterTypeSerializer
-    filterset_class = filters.ClusterTypeFilter
+    filterset_class = filtersets.ClusterTypeFilterSet
 
 
-class ClusterGroupViewSet(ModelViewSet):
-    queryset = ClusterGroup.objects.annotate(
-        cluster_count=Count('clusters')
-    )
+class ClusterGroupViewSet(NetBoxModelViewSet):
+    queryset = ClusterGroup.objects.all()
     serializer_class = serializers.ClusterGroupSerializer
-    filterset_class = filters.ClusterGroupFilter
+    filterset_class = filtersets.ClusterGroupFilterSet
 
 
-class ClusterViewSet(CustomFieldModelViewSet):
-    queryset = Cluster.objects.select_related(
-        'type', 'group', 'site',
-    ).prefetch_related(
-        'tags'
-    ).annotate(
-        device_count=get_subquery(Device, 'cluster'),
-        virtualmachine_count=get_subquery(VirtualMachine, 'cluster')
+class ClusterViewSet(NetBoxModelViewSet):
+    queryset = Cluster.objects.prefetch_related('virtual_machines').annotate(
+        allocated_vcpus=Sum('virtual_machines__vcpus'),
+        allocated_memory=Sum('virtual_machines__memory'),
+        allocated_disk=Sum('virtual_machines__disk'),
     )
     serializer_class = serializers.ClusterSerializer
-    filterset_class = filters.ClusterFilter
+    filterset_class = filtersets.ClusterFilterSet
 
 
 #
 # Virtual machines
 #
 
-class VirtualMachineViewSet(CustomFieldModelViewSet):
-    queryset = VirtualMachine.objects.select_related(
-        'cluster__site', 'role', 'tenant', 'platform', 'primary_ip4', 'primary_ip6'
-    ).prefetch_related('tags')
-    filterset_class = filters.VirtualMachineFilter
+class VirtualMachineViewSet(ConfigContextQuerySetMixin, RenderConfigMixin, NetBoxModelViewSet):
+    queryset = VirtualMachine.objects.all()
+    filterset_class = filtersets.VirtualMachineFilterSet
 
     def get_serializer_class(self):
         """
@@ -72,27 +62,28 @@ class VirtualMachineViewSet(CustomFieldModelViewSet):
 
         Else, return the VirtualMachineWithConfigContextSerializer
         """
-
         request = self.get_serializer_context()['request']
-        if request.query_params.get('brief', False):
-            return serializers.NestedVirtualMachineSerializer
-
-        elif 'config_context' in request.query_params.get('exclude', []):
+        if self.brief or 'config_context' in request.query_params.get('exclude', []):
             return serializers.VirtualMachineSerializer
 
         return serializers.VirtualMachineWithConfigContextSerializer
 
 
-class InterfaceViewSet(ModelViewSet):
-    queryset = Interface.objects.filter(
-        virtual_machine__isnull=False
-    ).select_related('virtual_machine').prefetch_related('tags')
-    serializer_class = serializers.InterfaceSerializer
-    filterset_class = filters.InterfaceFilter
+class VMInterfaceViewSet(NetBoxModelViewSet):
+    queryset = VMInterface.objects.prefetch_related(
+        'l2vpn_terminations',  # Referenced by VMInterfaceSerializer.l2vpn_termination
+        'ip_addresses',  # Referenced by VMInterface.count_ipaddresses()
+        'fhrp_group_assignments',  # Referenced by VMInterface.count_fhrp_groups()
+    )
+    serializer_class = serializers.VMInterfaceSerializer
+    filterset_class = filtersets.VMInterfaceFilterSet
 
-    def get_serializer_class(self):
-        request = self.get_serializer_context()['request']
-        if request.query_params.get('brief', False):
-            # Override get_serializer_for_model(), which will return the DCIM NestedInterfaceSerializer
-            return serializers.NestedInterfaceSerializer
-        return serializers.InterfaceSerializer
+    def get_bulk_destroy_queryset(self):
+        # Ensure child interfaces are deleted prior to their parents
+        return self.get_queryset().order_by('virtual_machine', 'parent', CollateAsChar('_name'))
+
+
+class VirtualDiskViewSet(NetBoxModelViewSet):
+    queryset = VirtualDisk.objects.all()
+    serializer_class = serializers.VirtualDiskSerializer
+    filterset_class = filtersets.VirtualDiskFilterSet

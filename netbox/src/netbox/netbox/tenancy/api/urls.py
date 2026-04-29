@@ -1,25 +1,19 @@
-from rest_framework import routers
+from netbox.api.routers import NetBoxRouter
 
 from . import views
 
-
-class TenancyRootView(routers.APIRootView):
-    """
-    Tenancy API root view
-    """
-    def get_view_name(self):
-        return 'Tenancy'
-
-
-router = routers.DefaultRouter()
-router.APIRootView = TenancyRootView
-
-# Field choices
-router.register(r'_choices', views.TenancyFieldChoicesViewSet, basename='field-choice')
+router = NetBoxRouter()
+router.APIRootView = views.TenancyRootView
 
 # Tenants
-router.register(r'tenant-groups', views.TenantGroupViewSet)
-router.register(r'tenants', views.TenantViewSet)
+router.register('tenant-groups', views.TenantGroupViewSet)
+router.register('tenants', views.TenantViewSet)
+
+# Contacts
+router.register('contact-groups', views.ContactGroupViewSet)
+router.register('contact-roles', views.ContactRoleViewSet)
+router.register('contacts', views.ContactViewSet)
+router.register('contact-assignments', views.ContactAssignmentViewSet)
 
 app_name = 'tenancy-api'
 urlpatterns = router.urls

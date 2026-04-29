@@ -1,306 +1,468 @@
-from django.conf import settings
-from django.contrib import messages
-from django.contrib.auth import login as auth_login, logout as auth_logout, update_session_auth_hash
-from django.contrib.auth.mixins import LoginRequiredMixin, PermissionRequiredMixin
-from django.contrib.auth.models import update_last_login
-from django.contrib.auth.signals import user_logged_in
-from django.http import HttpResponseForbidden, HttpResponseRedirect
-from django.shortcuts import get_object_or_404, redirect, render
-from django.urls import reverse
-from django.utils.decorators import method_decorator
-from django.utils.http import is_safe_url
-from django.views.decorators.debug import sensitive_post_parameters
-from django.views.generic import View
+from django.db.models import Count
+from django.utils.translation import gettext_lazy as _
 
-from secrets.forms import UserKeyForm
-from secrets.models import SessionKey, UserKey
-from utilities.forms import ConfirmationForm
-from .forms import LoginForm, PasswordChangeForm, TokenForm
-from .models import Token
+from core.models import ObjectChange
+from core.tables import ObjectChangeTable
+from netbox.object_actions import AddObject, BulkDelete, BulkEdit, BulkExport, BulkImport, BulkRename
+from netbox.ui import actions, layout
+from netbox.ui.panels import (
+    ContextTablePanel,
+    JSONPanel,
+    ObjectsTablePanel,
+    OrganizationalObjectPanel,
+    RelatedObjectsPanel,
+    TemplatePanel,
+)
+from netbox.views import generic
+from users.ui import panels
+from utilities.query import count_related
+from utilities.views import GetRelatedModelsMixin, register_model_view
+
+from . import filtersets, forms, tables
+from .models import Group, ObjectPermission, Owner, OwnerGroup, Token, User
+
+#
+# Tokens
+#
+
+
+@register_model_view(Token, 'list', path='', detail=False)
+class TokenListView(generic.ObjectListView):
+    queryset = Token.objects.all()
+    filterset = filtersets.TokenFilterSet
+    filterset_form = forms.TokenFilterForm
+    table = tables.TokenTable
+    actions = (AddObject, BulkImport, BulkExport, BulkEdit, BulkDelete)
+
+
+@register_model_view(Token)
+class TokenView(generic.ObjectView):
+    queryset = Token.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.TokenPanel(),
+        ],
+        right_panels=[
+            panels.TokenExamplePanel(),
+        ],
+    )
+
+
+@register_model_view(Token, 'add', detail=False)
+@register_model_view(Token, 'edit')
+class TokenEditView(generic.ObjectEditView):
+    queryset = Token.objects.all()
+    form = forms.TokenForm
+    template_name = 'users/token_edit.html'
+
+
+@register_model_view(Token, 'delete')
+class TokenDeleteView(generic.ObjectDeleteView):
+    queryset = Token.objects.all()
+
+
+@register_model_view(Token, 'bulk_import', path='import', detail=False)
+class TokenBulkImportView(generic.BulkImportView):
+    queryset = Token.objects.all()
+    model_form = forms.TokenImportForm
+
+
+@register_model_view(Token, 'bulk_edit', path='edit', detail=False)
+class TokenBulkEditView(generic.BulkEditView):
+    queryset = Token.objects.all()
+    table = tables.TokenTable
+    form = forms.TokenBulkEditForm
+
+
+@register_model_view(Token, 'bulk_delete', path='delete', detail=False)
+class TokenBulkDeleteView(generic.BulkDeleteView):
+    queryset = Token.objects.all()
+    table = tables.TokenTable
 
 
 #
-# Login/logout
+# Users
 #
 
-class LoginView(View):
-    template_name = 'login.html'
-
-    @method_decorator(sensitive_post_parameters('password'))
-    def dispatch(self, *args, **kwargs):
-        return super().dispatch(*args, **kwargs)
-
-    def get(self, request):
-        form = LoginForm(request)
-
-        return render(request, self.template_name, {
-            'form': form,
-        })
-
-    def post(self, request):
-        form = LoginForm(request, data=request.POST)
-        if form.is_valid():
-
-            # Determine where to direct user after successful login
-            redirect_to = request.POST.get('next', '')
-            if not is_safe_url(url=redirect_to, allowed_hosts=request.get_host()):
-                redirect_to = reverse('home')
-
-            # If maintenance mode is enabled, assume the database is read-only, and disable updating the user's
-            # last_login time upon authentication.
-            if settings.MAINTENANCE_MODE:
-                user_logged_in.disconnect(update_last_login, dispatch_uid='update_last_login')
-
-            # Authenticate user
-            auth_login(request, form.get_user())
-            messages.info(request, "Logged in as {}.".format(request.user))
-
-            return HttpResponseRedirect(redirect_to)
-
-        return render(request, self.template_name, {
-            'form': form,
-        })
-
-
-class LogoutView(View):
-
-    def get(self, request):
-
-        # Log out the user
-        auth_logout(request)
-        messages.info(request, "You have logged out.")
-
-        # Delete session key cookie (if set) upon logout
-        response = HttpResponseRedirect(reverse('home'))
-        response.delete_cookie('session_key')
-
-        return response
-
-
-#
-# User profiles
-#
-
-class ProfileView(LoginRequiredMixin, View):
-    template_name = 'users/profile.html'
-
-    def get(self, request):
-
-        return render(request, self.template_name, {
-            'active_tab': 'profile',
-        })
-
-
-class ChangePasswordView(LoginRequiredMixin, View):
-    template_name = 'users/change_password.html'
-
-    def get(self, request):
-        form = PasswordChangeForm(user=request.user)
-
-        return render(request, self.template_name, {
-            'form': form,
-            'active_tab': 'change_password',
-        })
-
-    def post(self, request):
-        form = PasswordChangeForm(user=request.user, data=request.POST)
-        if form.is_valid():
-            form.save()
-            update_session_auth_hash(request, form.user)
-            messages.success(request, "Your password has been changed successfully.")
-            return redirect('user:profile')
-
-        return render(request, self.template_name, {
-            'form': form,
-            'active_tab': 'change_password',
-        })
-
-
-class UserKeyView(LoginRequiredMixin, View):
-    template_name = 'users/userkey.html'
-
-    def get(self, request):
-        try:
-            userkey = UserKey.objects.get(user=request.user)
-        except UserKey.DoesNotExist:
-            userkey = None
-
-        return render(request, self.template_name, {
-            'userkey': userkey,
-            'active_tab': 'userkey',
-        })
-
-
-class UserKeyEditView(LoginRequiredMixin, View):
-    template_name = 'users/userkey_edit.html'
-
-    def dispatch(self, request, *args, **kwargs):
-        try:
-            self.userkey = UserKey.objects.get(user=request.user)
-        except UserKey.DoesNotExist:
-            self.userkey = UserKey(user=request.user)
-
-        return super().dispatch(request, *args, **kwargs)
-
-    def get(self, request):
-        form = UserKeyForm(instance=self.userkey)
-
-        return render(request, self.template_name, {
-            'userkey': self.userkey,
-            'form': form,
-            'active_tab': 'userkey',
-        })
-
-    def post(self, request):
-        form = UserKeyForm(data=request.POST, instance=self.userkey)
-        if form.is_valid():
-            uk = form.save(commit=False)
-            uk.user = request.user
-            uk.save()
-            messages.success(request, "Your user key has been saved.")
-            return redirect('user:userkey')
-
-        return render(request, self.template_name, {
-            'userkey': self.userkey,
-            'form': form,
-            'active_tab': 'userkey',
-        })
-
-
-class SessionKeyDeleteView(LoginRequiredMixin, View):
-
-    def get(self, request):
-
-        sessionkey = get_object_or_404(SessionKey, userkey__user=request.user)
-        form = ConfirmationForm()
-
-        return render(request, 'users/sessionkey_delete.html', {
-            'obj_type': sessionkey._meta.verbose_name,
-            'form': form,
-            'return_url': reverse('user:userkey'),
-        })
-
-    def post(self, request):
-
-        sessionkey = get_object_or_404(SessionKey, userkey__user=request.user)
-        form = ConfirmationForm(request.POST)
-        if form.is_valid():
-
-            # Delete session key
-            sessionkey.delete()
-            messages.success(request, "Session key deleted")
-
-            # Delete cookie
-            response = redirect('user:userkey')
-            response.delete_cookie('session_key')
-
-            return response
-
-        return render(request, 'users/sessionkey_delete.html', {
-            'obj_type': sessionkey._meta.verbose_name,
-            'form': form,
-            'return_url': reverse('user:userkey'),
-        })
-
-
-#
-# API tokens
-#
-
-class TokenListView(LoginRequiredMixin, View):
-
-    def get(self, request):
-
-        tokens = Token.objects.filter(user=request.user)
-
-        return render(request, 'users/api_tokens.html', {
-            'tokens': tokens,
-            'active_tab': 'api_tokens',
-        })
-
-
-class TokenEditView(LoginRequiredMixin, View):
-
-    def get(self, request, pk=None):
-
-        if pk is not None:
-            if not request.user.has_perm('users.change_token'):
-                return HttpResponseForbidden()
-            token = get_object_or_404(Token.objects.filter(user=request.user), pk=pk)
-        else:
-            if not request.user.has_perm('users.add_token'):
-                return HttpResponseForbidden()
-            token = Token(user=request.user)
-
-        form = TokenForm(instance=token)
-
-        return render(request, 'utilities/obj_edit.html', {
-            'obj': token,
-            'obj_type': token._meta.verbose_name,
-            'form': form,
-            'return_url': reverse('user:token_list'),
-        })
-
-    def post(self, request, pk=None):
-
-        if pk is not None:
-            token = get_object_or_404(Token.objects.filter(user=request.user), pk=pk)
-            form = TokenForm(request.POST, instance=token)
-        else:
-            token = Token()
-            form = TokenForm(request.POST)
-
-        if form.is_valid():
-            token = form.save(commit=False)
-            token.user = request.user
-            token.save()
-
-            msg = "Modified token {}".format(token) if pk else "Created token {}".format(token)
-            messages.success(request, msg)
-
-            if '_addanother' in request.POST:
-                return redirect(request.path)
-            else:
-                return redirect('user:token_list')
-
-        return render(request, 'utilities/obj_edit.html', {
-            'obj': token,
-            'obj_type': token._meta.verbose_name,
-            'form': form,
-            'return_url': reverse('user:token_list'),
-        })
-
-
-class TokenDeleteView(PermissionRequiredMixin, View):
-    permission_required = 'users.delete_token'
-
-    def get(self, request, pk):
-
-        token = get_object_or_404(Token.objects.filter(user=request.user), pk=pk)
-        initial_data = {
-            'return_url': reverse('user:token_list'),
+@register_model_view(User, 'list', path='', detail=False)
+class UserListView(generic.ObjectListView):
+    queryset = User.objects.all()
+    filterset = filtersets.UserFilterSet
+    filterset_form = forms.UserFilterForm
+    table = tables.UserTable
+
+
+@register_model_view(User)
+class UserView(generic.ObjectView):
+    queryset = User.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.UserPanel(),
+        ],
+        right_panels=[
+            ObjectsTablePanel(
+                'users.Group', title=_('Assigned Groups'), filters={'user_id': lambda ctx: ctx['object'].pk}
+            ),
+            ObjectsTablePanel(
+                'users.ObjectPermission',
+                title=_('Assigned Permissions'),
+                filters={'user_id': lambda ctx: ctx['object'].pk},
+            ),
+            ObjectsTablePanel(
+                'users.Owner', title=_('Owner Membership'), filters={'user_id': lambda ctx: ctx['object'].pk}
+            ),
+        ],
+        bottom_panels=[
+            ContextTablePanel(
+                'changelog_table',
+                title=_('Recent Activity'),
+                actions=[
+                    actions.LinkAction(
+                        view_name='core:objectchange_list',
+                        url_params={'user_id': lambda ctx: ctx['object'].pk},
+                        label=_('View All'),
+                        button_icon='arrow-right-thick',
+                        permissions=['core.view_objectchange'],
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    def get_extra_context(self, request, instance):
+        changelog = ObjectChange.objects.valid_models().restrict(request.user, 'view').filter(user=instance)[:20]
+        changelog_table = ObjectChangeTable(changelog)
+        changelog_table.orderable = False
+        changelog_table.configure(request)
+
+        return {
+            'changelog_table': changelog_table,
         }
-        form = ConfirmationForm(initial=initial_data)
 
-        return render(request, 'utilities/obj_delete.html', {
-            'obj': token,
-            'obj_type': token._meta.verbose_name,
-            'form': form,
-            'return_url': reverse('user:token_list'),
-        })
 
-    def post(self, request, pk):
+@register_model_view(User, 'add', detail=False)
+@register_model_view(User, 'edit')
+class UserEditView(generic.ObjectEditView):
+    queryset = User.objects.all()
+    form = forms.UserForm
 
-        token = get_object_or_404(Token.objects.filter(user=request.user), pk=pk)
-        form = ConfirmationForm(request.POST)
-        if form.is_valid():
-            token.delete()
-            messages.success(request, "Token deleted")
-            return redirect('user:token_list')
 
-        return render(request, 'utilities/obj_delete.html', {
-            'obj': token,
-            'obj_type': token._meta.verbose_name,
-            'form': form,
-            'return_url': reverse('user:token_list'),
-        })
+@register_model_view(User, 'delete')
+class UserDeleteView(generic.ObjectDeleteView):
+    queryset = User.objects.all()
+
+
+@register_model_view(User, 'bulk_import', path='import', detail=False)
+class UserBulkImportView(generic.BulkImportView):
+    queryset = User.objects.all()
+    model_form = forms.UserImportForm
+
+
+@register_model_view(User, 'bulk_edit', path='edit', detail=False)
+class UserBulkEditView(generic.BulkEditView):
+    queryset = User.objects.all()
+    filterset = filtersets.UserFilterSet
+    table = tables.UserTable
+    form = forms.UserBulkEditForm
+
+
+@register_model_view(User, 'bulk_rename', path='rename', detail=False)
+class UserBulkRenameView(generic.BulkRenameView):
+    queryset = User.objects.all()
+    field_name = 'username'
+    filterset = filtersets.UserFilterSet
+
+
+@register_model_view(User, 'bulk_delete', path='delete', detail=False)
+class UserBulkDeleteView(generic.BulkDeleteView):
+    queryset = User.objects.all()
+    filterset = filtersets.UserFilterSet
+    table = tables.UserTable
+
+
+#
+# Groups
+#
+
+@register_model_view(Group, 'list', path='', detail=False)
+class GroupListView(generic.ObjectListView):
+    queryset = Group.objects.annotate(users_count=Count('user')).order_by('name')
+    filterset = filtersets.GroupFilterSet
+    filterset_form = forms.GroupFilterForm
+    table = tables.GroupTable
+
+
+@register_model_view(Group)
+class GroupView(generic.ObjectView):
+    queryset = Group.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            OrganizationalObjectPanel(),
+        ],
+        right_panels=[
+            ObjectsTablePanel('users.User', filters={'group_id': lambda ctx: ctx['object'].pk}),
+            ObjectsTablePanel(
+                'users.ObjectPermission',
+                title=_('Assigned Permissions'),
+                filters={'group_id': lambda ctx: ctx['object'].pk},
+            ),
+            ObjectsTablePanel(
+                'users.Owner', title=_('Owner Membership'), filters={'user_group_id': lambda ctx: ctx['object'].pk}
+            ),
+        ],
+    )
+
+
+@register_model_view(Group, 'add', detail=False)
+@register_model_view(Group, 'edit')
+class GroupEditView(generic.ObjectEditView):
+    queryset = Group.objects.all()
+    form = forms.GroupForm
+
+
+@register_model_view(Group, 'delete')
+class GroupDeleteView(generic.ObjectDeleteView):
+    queryset = Group.objects.all()
+
+
+@register_model_view(Group, 'bulk_import', path='import', detail=False)
+class GroupBulkImportView(generic.BulkImportView):
+    queryset = Group.objects.all()
+    model_form = forms.GroupImportForm
+
+
+@register_model_view(Group, 'bulk_edit', path='edit', detail=False)
+class GroupBulkEditView(generic.BulkEditView):
+    queryset = Group.objects.all()
+    filterset = filtersets.GroupFilterSet
+    table = tables.GroupTable
+    form = forms.GroupBulkEditForm
+
+
+@register_model_view(Group, 'bulk_rename', path='rename', detail=False)
+class GroupBulkRenameView(generic.BulkRenameView):
+    queryset = Group.objects.all()
+    filterset = filtersets.GroupFilterSet
+
+
+@register_model_view(Group, 'bulk_delete', path='delete', detail=False)
+class GroupBulkDeleteView(generic.BulkDeleteView):
+    queryset = Group.objects.annotate(users_count=Count('user')).order_by('name')
+    filterset = filtersets.GroupFilterSet
+    table = tables.GroupTable
+
+
+#
+# ObjectPermissions
+#
+
+@register_model_view(ObjectPermission, 'list', path='', detail=False)
+class ObjectPermissionListView(generic.ObjectListView):
+    queryset = ObjectPermission.objects.all()
+    filterset = filtersets.ObjectPermissionFilterSet
+    filterset_form = forms.ObjectPermissionFilterForm
+    table = tables.ObjectPermissionTable
+    actions = (AddObject, BulkExport, BulkEdit, BulkRename, BulkDelete)
+
+
+@register_model_view(ObjectPermission)
+class ObjectPermissionView(generic.ObjectView):
+    queryset = ObjectPermission.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.ObjectPermissionPanel(),
+            panels.ObjectPermissionActionsPanel(),
+            JSONPanel('constraints', title=_('Constraints')),
+        ],
+        right_panels=[
+            TemplatePanel('users/panels/object_types.html'),
+            ObjectsTablePanel(
+                'users.User', title=_('Assigned Users'), filters={'permission_id': lambda ctx: ctx['object'].pk}
+            ),
+            ObjectsTablePanel(
+                'users.Group', title=_('Assigned Groups'), filters={'permission_id': lambda ctx: ctx['object'].pk}
+            ),
+        ],
+    )
+
+
+@register_model_view(ObjectPermission, 'add', detail=False)
+@register_model_view(ObjectPermission, 'edit')
+class ObjectPermissionEditView(generic.ObjectEditView):
+    queryset = ObjectPermission.objects.all()
+    form = forms.ObjectPermissionForm
+
+
+@register_model_view(ObjectPermission, 'delete')
+class ObjectPermissionDeleteView(generic.ObjectDeleteView):
+    queryset = ObjectPermission.objects.all()
+    filterset = filtersets.ObjectPermissionFilterSet
+
+
+@register_model_view(ObjectPermission, 'bulk_edit', path='edit', detail=False)
+class ObjectPermissionBulkEditView(generic.BulkEditView):
+    queryset = ObjectPermission.objects.all()
+    filterset = filtersets.ObjectPermissionFilterSet
+    table = tables.ObjectPermissionTable
+    form = forms.ObjectPermissionBulkEditForm
+
+
+@register_model_view(ObjectPermission, 'bulk_rename', path='rename', detail=False)
+class ObjectPermissionBulkRenameView(generic.BulkRenameView):
+    queryset = ObjectPermission.objects.all()
+
+
+@register_model_view(ObjectPermission, 'bulk_delete', path='delete', detail=False)
+class ObjectPermissionBulkDeleteView(generic.BulkDeleteView):
+    queryset = ObjectPermission.objects.all()
+    filterset = filtersets.ObjectPermissionFilterSet
+    table = tables.ObjectPermissionTable
+
+
+#
+# Owner groups
+#
+
+@register_model_view(OwnerGroup, 'list', path='', detail=False)
+class OwnerGroupListView(generic.ObjectListView):
+    queryset = OwnerGroup.objects.annotate(
+        owner_count=count_related(Owner, 'group')
+    )
+    filterset = filtersets.OwnerGroupFilterSet
+    filterset_form = forms.OwnerGroupFilterForm
+    table = tables.OwnerGroupTable
+
+
+@register_model_view(OwnerGroup)
+class OwnerGroupView(generic.ObjectView):
+    queryset = OwnerGroup.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            OrganizationalObjectPanel(),
+        ],
+        right_panels=[
+            ObjectsTablePanel(
+                'users.Owner',
+                filters={'group_id': lambda ctx: ctx['object'].pk},
+                title=_('Members'),
+                actions=[
+                    actions.AddObject(
+                        'users.Owner',
+                        url_params={'group': lambda ctx: ctx['object'].pk},
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+@register_model_view(OwnerGroup, 'add', detail=False)
+@register_model_view(OwnerGroup, 'edit')
+class OwnerGroupEditView(generic.ObjectEditView):
+    queryset = OwnerGroup.objects.all()
+    form = forms.OwnerGroupForm
+
+
+@register_model_view(OwnerGroup, 'delete')
+class OwnerGroupDeleteView(generic.ObjectDeleteView):
+    queryset = OwnerGroup.objects.all()
+
+
+@register_model_view(OwnerGroup, 'bulk_import', path='import', detail=False)
+class OwnerGroupBulkImportView(generic.BulkImportView):
+    queryset = OwnerGroup.objects.all()
+    model_form = forms.OwnerGroupImportForm
+
+
+@register_model_view(OwnerGroup, 'bulk_edit', path='edit', detail=False)
+class OwnerGroupBulkEditView(generic.BulkEditView):
+    queryset = OwnerGroup.objects.all()
+    filterset = filtersets.OwnerGroupFilterSet
+    table = tables.OwnerGroupTable
+    form = forms.OwnerGroupBulkEditForm
+
+
+@register_model_view(OwnerGroup, 'bulk_rename', path='rename', detail=False)
+class OwnerGroupBulkRenameView(generic.BulkRenameView):
+    queryset = OwnerGroup.objects.all()
+
+
+@register_model_view(OwnerGroup, 'bulk_delete', path='delete', detail=False)
+class OwnerGroupBulkDeleteView(generic.BulkDeleteView):
+    queryset = OwnerGroup.objects.all()
+    filterset = filtersets.OwnerGroupFilterSet
+    table = tables.OwnerGroupTable
+
+
+#
+# Owners
+#
+
+@register_model_view(Owner, 'list', path='', detail=False)
+class OwnerListView(generic.ObjectListView):
+    queryset = Owner.objects.all()
+    filterset = filtersets.OwnerFilterSet
+    filterset_form = forms.OwnerFilterForm
+    table = tables.OwnerTable
+
+
+@register_model_view(Owner)
+class OwnerView(GetRelatedModelsMixin, generic.ObjectView):
+    queryset = Owner.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.OwnerPanel(),
+            ObjectsTablePanel('users.Group', filters={'owner_id': lambda ctx: ctx['object'].pk}),
+            ObjectsTablePanel('users.User', filters={'owner_id': lambda ctx: ctx['object'].pk}),
+        ],
+        right_panels=[
+            RelatedObjectsPanel(),
+        ],
+    )
+
+    def get_extra_context(self, request, instance):
+        return {
+            'related_models': self.get_related_models(
+                request,
+                instance,
+                omit=(Group, User),
+            ),
+        }
+
+
+@register_model_view(Owner, 'add', detail=False)
+@register_model_view(Owner, 'edit')
+class OwnerEditView(generic.ObjectEditView):
+    queryset = Owner.objects.all()
+    form = forms.OwnerForm
+
+
+@register_model_view(Owner, 'delete')
+class OwnerDeleteView(generic.ObjectDeleteView):
+    queryset = Owner.objects.all()
+
+
+@register_model_view(Owner, 'bulk_import', path='import', detail=False)
+class OwnerBulkImportView(generic.BulkImportView):
+    queryset = Owner.objects.all()
+    model_form = forms.OwnerImportForm
+
+
+@register_model_view(Owner, 'bulk_edit', path='edit', detail=False)
+class OwnerBulkEditView(generic.BulkEditView):
+    queryset = Owner.objects.all()
+    filterset = filtersets.OwnerFilterSet
+    table = tables.OwnerTable
+    form = forms.OwnerBulkEditForm
+
+
+@register_model_view(Owner, 'bulk_rename', path='rename', detail=False)
+class OwnerBulkRenameView(generic.BulkRenameView):
+    queryset = Owner.objects.all()
+
+
+@register_model_view(Owner, 'bulk_delete', path='delete', detail=False)
+class OwnerBulkDeleteView(generic.BulkDeleteView):
+    queryset = Owner.objects.all()
+    filterset = filtersets.OwnerFilterSet
+    table = tables.OwnerTable

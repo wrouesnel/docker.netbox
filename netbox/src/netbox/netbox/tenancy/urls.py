@@ -1,29 +1,28 @@
-from django.urls import path
+from django.urls import include, path
 
-from extras.views import ObjectChangeLogView
-from . import views
-from .models import Tenant, TenantGroup
+from utilities.urls import get_model_urls
+
+from . import views  # noqa F401
 
 app_name = 'tenancy'
 urlpatterns = [
 
-    # Tenant groups
-    path(r'tenant-groups/', views.TenantGroupListView.as_view(), name='tenantgroup_list'),
-    path(r'tenant-groups/add/', views.TenantGroupCreateView.as_view(), name='tenantgroup_add'),
-    path(r'tenant-groups/import/', views.TenantGroupBulkImportView.as_view(), name='tenantgroup_import'),
-    path(r'tenant-groups/delete/', views.TenantGroupBulkDeleteView.as_view(), name='tenantgroup_bulk_delete'),
-    path(r'tenant-groups/<slug:slug>/edit/', views.TenantGroupEditView.as_view(), name='tenantgroup_edit'),
-    path(r'tenant-groups/<slug:slug>/changelog/', ObjectChangeLogView.as_view(), name='tenantgroup_changelog', kwargs={'model': TenantGroup}),
+    path('tenant-groups/', include(get_model_urls('tenancy', 'tenantgroup', detail=False))),
+    path('tenant-groups/<int:pk>/', include(get_model_urls('tenancy', 'tenantgroup'))),
 
-    # Tenants
-    path(r'tenants/', views.TenantListView.as_view(), name='tenant_list'),
-    path(r'tenants/add/', views.TenantCreateView.as_view(), name='tenant_add'),
-    path(r'tenants/import/', views.TenantBulkImportView.as_view(), name='tenant_import'),
-    path(r'tenants/edit/', views.TenantBulkEditView.as_view(), name='tenant_bulk_edit'),
-    path(r'tenants/delete/', views.TenantBulkDeleteView.as_view(), name='tenant_bulk_delete'),
-    path(r'tenants/<slug:slug>/', views.TenantView.as_view(), name='tenant'),
-    path(r'tenants/<slug:slug>/edit/', views.TenantEditView.as_view(), name='tenant_edit'),
-    path(r'tenants/<slug:slug>/delete/', views.TenantDeleteView.as_view(), name='tenant_delete'),
-    path(r'tenants/<slug:slug>/changelog/', ObjectChangeLogView.as_view(), name='tenant_changelog', kwargs={'model': Tenant}),
+    path('tenants/', include(get_model_urls('tenancy', 'tenant', detail=False))),
+    path('tenants/<int:pk>/', include(get_model_urls('tenancy', 'tenant'))),
+
+    path('contact-groups/', include(get_model_urls('tenancy', 'contactgroup', detail=False))),
+    path('contact-groups/<int:pk>/', include(get_model_urls('tenancy', 'contactgroup'))),
+
+    path('contact-roles/', include(get_model_urls('tenancy', 'contactrole', detail=False))),
+    path('contact-roles/<int:pk>/', include(get_model_urls('tenancy', 'contactrole'))),
+
+    path('contacts/', include(get_model_urls('tenancy', 'contact', detail=False))),
+    path('contacts/<int:pk>/', include(get_model_urls('tenancy', 'contact'))),
+
+    path('contact-assignments/', include(get_model_urls('tenancy', 'contactassignment', detail=False))),
+    path('contact-assignments/<int:pk>/', include(get_model_urls('tenancy', 'contactassignment'))),
 
 ]

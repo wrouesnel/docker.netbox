@@ -1,30 +1,19 @@
-from rest_framework import routers
+from netbox.api.routers import NetBoxRouter
 
 from . import views
 
-
-class VirtualizationRootView(routers.APIRootView):
-    """
-    Virtualization API root view
-    """
-    def get_view_name(self):
-        return 'Virtualization'
-
-
-router = routers.DefaultRouter()
-router.APIRootView = VirtualizationRootView
-
-# Field choices
-router.register(r'_choices', views.VirtualizationFieldChoicesViewSet, basename='field-choice')
+router = NetBoxRouter()
+router.APIRootView = views.VirtualizationRootView
 
 # Clusters
-router.register(r'cluster-types', views.ClusterTypeViewSet)
-router.register(r'cluster-groups', views.ClusterGroupViewSet)
-router.register(r'clusters', views.ClusterViewSet)
+router.register('cluster-types', views.ClusterTypeViewSet)
+router.register('cluster-groups', views.ClusterGroupViewSet)
+router.register('clusters', views.ClusterViewSet)
 
 # VirtualMachines
-router.register(r'virtual-machines', views.VirtualMachineViewSet)
-router.register(r'interfaces', views.InterfaceViewSet)
+router.register('virtual-machines', views.VirtualMachineViewSet)
+router.register('interfaces', views.VMInterfaceViewSet)
+router.register('virtual-disks', views.VirtualDiskViewSet)
 
 app_name = 'virtualization-api'
 urlpatterns = router.urls

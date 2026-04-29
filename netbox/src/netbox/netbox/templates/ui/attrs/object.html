@@ -1,0 +1,38 @@
+{% if group %}
+  {# Display an object with its parent group #}
+  <ol class="breadcrumb" aria-label="breadcrumbs">
+    <li class="breadcrumb-item">
+      {% if linkify %}{{ group|linkify }}{% else %}{{ group }}{% endif %}
+    </li>
+    <li class="breadcrumb-item">
+      {% if colored and value.color %}
+        {% if linkify %}
+          {% with badge_url=value.get_absolute_url %}
+            {% badge value hex_color=value.color url=badge_url %}
+          {% endwith %}
+        {% else %}
+          {% badge value hex_color=value.color %}
+        {% endif %}
+      {% elif linkify %}
+        {{ value|linkify }}
+      {% else %}
+        {{ value }}
+      {% endif %}
+    </li>
+  </ol>
+{% else %}
+  {# Display only the object #}
+  {% if colored and value.color %}
+    {% if linkify %}
+      {% with badge_url=value.get_absolute_url %}
+        {% badge value hex_color=value.color url=badge_url %}
+      {% endwith %}
+    {% else %}
+      {% badge value hex_color=value.color %}
+    {% endif %}
+  {% elif linkify %}
+    {{ value|linkify }}
+  {% else %}
+    {{ value }}
+  {% endif %}
+{% endif %}

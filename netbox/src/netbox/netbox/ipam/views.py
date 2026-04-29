@@ -1,733 +1,1133 @@
-import netaddr
-from django.conf import settings
-from django.contrib.auth.mixins import PermissionRequiredMixin
-from django.db.models import Count, Q
+from django.contrib.contenttypes.models import ContentType
+from django.db.models import Prefetch
+from django.db.models.expressions import RawSQL
 from django.shortcuts import get_object_or_404, redirect, render
-from django.views.generic import View
-from django_tables2 import RequestConfig
+from django.urls import reverse
+from django.utils.translation import gettext_lazy as _
 
-from dcim.models import Device, Interface
-from utilities.paginator import EnhancedPaginator
-from utilities.views import (
-    BulkCreateView, BulkDeleteView, BulkEditView, BulkImportView, ObjectDeleteView, ObjectEditView, ObjectListView,
+from circuits.models import Provider
+from dcim.filtersets import InterfaceFilterSet
+from dcim.forms import InterfaceFilterForm
+from dcim.models import Device, Interface, Site
+from extras.ui.panels import CustomFieldsPanel, TagsPanel
+from netbox.object_actions import AddObject, BulkDelete, BulkEdit, BulkExport, BulkImport
+from netbox.ui import actions, layout
+from netbox.ui.panels import (
+    CommentsPanel,
+    ContextTablePanel,
+    ObjectsTablePanel,
+    PluginContentPanel,
+    RelatedObjectsPanel,
+    TemplatePanel,
 )
-from virtualization.models import VirtualMachine
-from . import filters, forms, tables
-from .constants import IPADDRESS_ROLE_ANYCAST, PREFIX_STATUS_ACTIVE, PREFIX_STATUS_DEPRECATED, PREFIX_STATUS_RESERVED
-from .models import Aggregate, IPAddress, Prefix, RIR, Role, Service, VLAN, VLANGroup, VRF
+from netbox.views import generic
+from utilities.query import count_related
+from utilities.tables import get_table_ordering
+from utilities.views import GetRelatedModelsMixin, ViewTab, register_model_view
+from virtualization.filtersets import VMInterfaceFilterSet
+from virtualization.forms import VMInterfaceFilterForm
+from virtualization.models import VirtualMachine, VMInterface
 
-
-def add_available_prefixes(parent, prefix_list):
-    """
-    Create fake Prefix objects for all unallocated space within a prefix.
-    """
-
-    # Find all unallocated space
-    available_prefixes = netaddr.IPSet(parent) ^ netaddr.IPSet([p.prefix for p in prefix_list])
-    available_prefixes = [Prefix(prefix=p) for p in available_prefixes.iter_cidrs()]
-
-    # Concatenate and sort complete list of children
-    prefix_list = list(prefix_list) + available_prefixes
-    prefix_list.sort(key=lambda p: p.prefix)
-
-    return prefix_list
-
-
-def add_available_ipaddresses(prefix, ipaddress_list, is_pool=False):
-    """
-    Annotate ranges of available IP addresses within a given prefix. If is_pool is True, the first and last IP will be
-    considered usable (regardless of mask length).
-    """
-
-    output = []
-    prev_ip = None
-
-    # Ignore the network and broadcast addresses for non-pool IPv4 prefixes larger than /31.
-    if prefix.version == 4 and prefix.prefixlen < 31 and not is_pool:
-        first_ip_in_prefix = netaddr.IPAddress(prefix.first + 1)
-        last_ip_in_prefix = netaddr.IPAddress(prefix.last - 1)
-    else:
-        first_ip_in_prefix = netaddr.IPAddress(prefix.first)
-        last_ip_in_prefix = netaddr.IPAddress(prefix.last)
-
-    if not ipaddress_list:
-        return [(
-            int(last_ip_in_prefix - first_ip_in_prefix + 1),
-            '{}/{}'.format(first_ip_in_prefix, prefix.prefixlen)
-        )]
-
-    # Account for any available IPs before the first real IP
-    if ipaddress_list[0].address.ip > first_ip_in_prefix:
-        skipped_count = int(ipaddress_list[0].address.ip - first_ip_in_prefix)
-        first_skipped = '{}/{}'.format(first_ip_in_prefix, prefix.prefixlen)
-        output.append((skipped_count, first_skipped))
-
-    # Iterate through existing IPs and annotate free ranges
-    for ip in ipaddress_list:
-        if prev_ip:
-            diff = int(ip.address.ip - prev_ip.address.ip)
-            if diff > 1:
-                first_skipped = '{}/{}'.format(prev_ip.address.ip + 1, prefix.prefixlen)
-                output.append((diff - 1, first_skipped))
-        output.append(ip)
-        prev_ip = ip
-
-    # Include any remaining available IPs
-    if prev_ip.address.ip < last_ip_in_prefix:
-        skipped_count = int(last_ip_in_prefix - prev_ip.address.ip)
-        first_skipped = '{}/{}'.format(prev_ip.address.ip + 1, prefix.prefixlen)
-        output.append((skipped_count, first_skipped))
-
-    return output
-
-
-def add_available_vlans(vlan_group, vlans):
-    """
-    Create fake records for all gaps between used VLANs
-    """
-    MIN_VLAN = 1
-    MAX_VLAN = 4094
-
-    if not vlans:
-        return [{'vid': MIN_VLAN, 'available': MAX_VLAN - MIN_VLAN + 1}]
-
-    prev_vid = MAX_VLAN
-    new_vlans = []
-    for vlan in vlans:
-        if vlan.vid - prev_vid > 1:
-            new_vlans.append({'vid': prev_vid + 1, 'available': vlan.vid - prev_vid - 1})
-        prev_vid = vlan.vid
-
-    if vlans[0].vid > MIN_VLAN:
-        new_vlans.append({'vid': MIN_VLAN, 'available': vlans[0].vid - MIN_VLAN})
-    if prev_vid < MAX_VLAN:
-        new_vlans.append({'vid': prev_vid + 1, 'available': MAX_VLAN - prev_vid})
-
-    vlans = list(vlans) + new_vlans
-    vlans.sort(key=lambda v: v.vid if type(v) == VLAN else v['vid'])
-
-    return vlans
-
+from . import filtersets, forms, tables
+from .choices import PrefixStatusChoices
+from .constants import *
+from .models import *
+from .ui import panels
+from .utils import add_available_vlans, add_requested_prefixes, annotate_ip_space
 
 #
 # VRFs
 #
 
-class VRFListView(PermissionRequiredMixin, ObjectListView):
-    permission_required = 'ipam.view_vrf'
-    queryset = VRF.objects.select_related('tenant')
-    filter = filters.VRFFilter
-    filter_form = forms.VRFFilterForm
+
+@register_model_view(VRF, 'list', path='', detail=False)
+class VRFListView(generic.ObjectListView):
+    queryset = VRF.objects.all()
+    filterset = filtersets.VRFFilterSet
+    filterset_form = forms.VRFFilterForm
     table = tables.VRFTable
-    template_name = 'ipam/vrf_list.html'
 
 
-class VRFView(PermissionRequiredMixin, View):
-    permission_required = 'ipam.view_vrf'
+@register_model_view(VRF)
+class VRFView(GetRelatedModelsMixin, generic.ObjectView):
+    queryset = VRF.objects.all()
+    layout = layout.Layout(
+        layout.Row(
+            layout.Column(
+                panels.VRFPanel(),
+                TagsPanel(),
+                PluginContentPanel('left_page'),
+            ),
+            layout.Column(
+                RelatedObjectsPanel(),
+                CustomFieldsPanel(),
+                CommentsPanel(),
+                PluginContentPanel('right_page'),
+            ),
+        ),
+        layout.Row(
+            layout.Column(
+                ContextTablePanel('import_targets_table', title=_('Import route targets')),
+            ),
+            layout.Column(
+                ContextTablePanel('export_targets_table', title=_('Export route targets')),
+            ),
+        ),
+        layout.Row(
+            layout.Column(
+                PluginContentPanel('full_width_page'),
+            ),
+        ),
+    )
 
-    def get(self, request, pk):
+    def get_extra_context(self, request, instance):
+        import_targets_table = tables.RouteTargetTable(
+            instance.import_targets.all(),
+            orderable=False
+        )
+        import_targets_table.configure(request)
 
-        vrf = get_object_or_404(VRF.objects.all(), pk=pk)
-        prefix_count = Prefix.objects.filter(vrf=vrf).count()
+        export_targets_table = tables.RouteTargetTable(
+            instance.export_targets.all(),
+            orderable=False
+        )
+        export_targets_table.configure(request)
 
-        return render(request, 'ipam/vrf.html', {
-            'vrf': vrf,
-            'prefix_count': prefix_count,
-        })
+        related_models = self.get_related_models(
+            request,
+            instance,
+            omit=(Interface, VMInterface),
+            extra=(
+                (
+                    Interface.objects.restrict(request.user, 'view').filter(vrf=instance),
+                    'vrf_id',
+                    _('Device Interfaces')
+                ),
+                (
+                    VMInterface.objects.restrict(request.user, 'view').filter(vrf=instance),
+                    'vrf_id',
+                    _('VM Interfaces')
+                ),
+            ),
+        )
 
-
-class VRFCreateView(PermissionRequiredMixin, ObjectEditView):
-    permission_required = 'ipam.add_vrf'
-    model = VRF
-    model_form = forms.VRFForm
-    template_name = 'ipam/vrf_edit.html'
-    default_return_url = 'ipam:vrf_list'
-
-
-class VRFEditView(VRFCreateView):
-    permission_required = 'ipam.change_vrf'
-
-
-class VRFDeleteView(PermissionRequiredMixin, ObjectDeleteView):
-    permission_required = 'ipam.delete_vrf'
-    model = VRF
-    default_return_url = 'ipam:vrf_list'
-
-
-class VRFBulkImportView(PermissionRequiredMixin, BulkImportView):
-    permission_required = 'ipam.add_vrf'
-    model_form = forms.VRFCSVForm
-    table = tables.VRFTable
-    default_return_url = 'ipam:vrf_list'
+        return {
+            'related_models': related_models,
+            'import_targets_table': import_targets_table,
+            'export_targets_table': export_targets_table,
+        }
 
 
-class VRFBulkEditView(PermissionRequiredMixin, BulkEditView):
-    permission_required = 'ipam.change_vrf'
-    queryset = VRF.objects.select_related('tenant')
-    filter = filters.VRFFilter
+@register_model_view(VRF, 'add', detail=False)
+@register_model_view(VRF, 'edit')
+class VRFEditView(generic.ObjectEditView):
+    queryset = VRF.objects.all()
+    form = forms.VRFForm
+
+
+@register_model_view(VRF, 'delete')
+class VRFDeleteView(generic.ObjectDeleteView):
+    queryset = VRF.objects.all()
+
+
+@register_model_view(VRF, 'bulk_import', path='import', detail=False)
+class VRFBulkImportView(generic.BulkImportView):
+    queryset = VRF.objects.all()
+    model_form = forms.VRFImportForm
+
+
+@register_model_view(VRF, 'bulk_edit', path='edit', detail=False)
+class VRFBulkEditView(generic.BulkEditView):
+    queryset = VRF.objects.all()
+    filterset = filtersets.VRFFilterSet
     table = tables.VRFTable
     form = forms.VRFBulkEditForm
-    default_return_url = 'ipam:vrf_list'
 
 
-class VRFBulkDeleteView(PermissionRequiredMixin, BulkDeleteView):
-    permission_required = 'ipam.delete_vrf'
-    queryset = VRF.objects.select_related('tenant')
-    filter = filters.VRFFilter
+@register_model_view(VRF, 'bulk_rename', path='rename', detail=False)
+class VRFBulkRenameView(generic.BulkRenameView):
+    queryset = VRF.objects.all()
+    filterset = filtersets.VRFFilterSet
+
+
+@register_model_view(VRF, 'bulk_delete', path='delete', detail=False)
+class VRFBulkDeleteView(generic.BulkDeleteView):
+    queryset = VRF.objects.all()
+    filterset = filtersets.VRFFilterSet
     table = tables.VRFTable
-    default_return_url = 'ipam:vrf_list'
+
+
+#
+# Route targets
+#
+
+@register_model_view(RouteTarget, 'list', path='', detail=False)
+class RouteTargetListView(generic.ObjectListView):
+    queryset = RouteTarget.objects.all()
+    filterset = filtersets.RouteTargetFilterSet
+    filterset_form = forms.RouteTargetFilterForm
+    table = tables.RouteTargetTable
+
+
+@register_model_view(RouteTarget)
+class RouteTargetView(generic.ObjectView):
+    queryset = RouteTarget.objects.all()
+    layout = layout.Layout(
+        layout.Row(
+            layout.Column(
+                panels.RouteTargetPanel(),
+                TagsPanel(),
+                PluginContentPanel('left_page'),
+            ),
+            layout.Column(
+                CustomFieldsPanel(),
+                CommentsPanel(),
+                PluginContentPanel('right_page'),
+            ),
+        ),
+        layout.Row(
+            layout.Column(
+                ObjectsTablePanel(
+                    'ipam.vrf',
+                    filters={'import_target_id': lambda ctx: ctx['object'].pk},
+                    title=_('Importing VRFs'),
+                ),
+            ),
+            layout.Column(
+                ObjectsTablePanel(
+                    'ipam.vrf',
+                    filters={'export_target_id': lambda ctx: ctx['object'].pk},
+                    title=_('Exporting VRFs'),
+                ),
+            ),
+        ),
+        layout.Row(
+            layout.Column(
+                ObjectsTablePanel(
+                    'vpn.l2vpn',
+                    filters={'import_target_id': lambda ctx: ctx['object'].pk},
+                    title=_('Importing L2VPNs'),
+                ),
+            ),
+            layout.Column(
+                ObjectsTablePanel(
+                    'vpn.l2vpn',
+                    filters={'export_target_id': lambda ctx: ctx['object'].pk},
+                    title=_('Exporting L2VPNs'),
+                ),
+            ),
+        ),
+        layout.Row(
+            layout.Column(
+                PluginContentPanel('full_width_page'),
+            ),
+        ),
+    )
+
+
+@register_model_view(RouteTarget, 'add', detail=False)
+@register_model_view(RouteTarget, 'edit')
+class RouteTargetEditView(generic.ObjectEditView):
+    queryset = RouteTarget.objects.all()
+    form = forms.RouteTargetForm
+
+
+@register_model_view(RouteTarget, 'delete')
+class RouteTargetDeleteView(generic.ObjectDeleteView):
+    queryset = RouteTarget.objects.all()
+
+
+@register_model_view(RouteTarget, 'bulk_import', path='import', detail=False)
+class RouteTargetBulkImportView(generic.BulkImportView):
+    queryset = RouteTarget.objects.all()
+    model_form = forms.RouteTargetImportForm
+
+
+@register_model_view(RouteTarget, 'bulk_edit', path='edit', detail=False)
+class RouteTargetBulkEditView(generic.BulkEditView):
+    queryset = RouteTarget.objects.all()
+    filterset = filtersets.RouteTargetFilterSet
+    table = tables.RouteTargetTable
+    form = forms.RouteTargetBulkEditForm
+
+
+@register_model_view(RouteTarget, 'bulk_rename', path='rename', detail=False)
+class RouteTargetBulkRenameView(generic.BulkRenameView):
+    queryset = RouteTarget.objects.all()
+    filterset = filtersets.RouteTargetFilterSet
+
+
+@register_model_view(RouteTarget, 'bulk_delete', path='delete', detail=False)
+class RouteTargetBulkDeleteView(generic.BulkDeleteView):
+    queryset = RouteTarget.objects.all()
+    filterset = filtersets.RouteTargetFilterSet
+    table = tables.RouteTargetTable
 
 
 #
 # RIRs
 #
 
-class RIRListView(PermissionRequiredMixin, ObjectListView):
-    permission_required = 'ipam.view_rir'
-    queryset = RIR.objects.annotate(aggregate_count=Count('aggregates'))
-    filter = filters.RIRFilter
-    filter_form = forms.RIRFilterForm
-    table = tables.RIRDetailTable
-    template_name = 'ipam/rir_list.html'
-
-    def alter_queryset(self, request):
-
-        if request.GET.get('family') == '6':
-            family = 6
-            denominator = 2 ** 64  # Count /64s for IPv6 rather than individual IPs
-        else:
-            family = 4
-            denominator = 1
-
-        rirs = []
-        for rir in self.queryset:
-
-            stats = {
-                'total': 0,
-                'active': 0,
-                'reserved': 0,
-                'deprecated': 0,
-                'available': 0,
-            }
-            aggregate_list = Aggregate.objects.filter(family=family, rir=rir)
-            for aggregate in aggregate_list:
-
-                queryset = Prefix.objects.filter(prefix__net_contained_or_equal=str(aggregate.prefix))
-
-                # Find all consumed space for each prefix status (we ignore containers for this purpose).
-                active_prefixes = netaddr.cidr_merge(
-                    [p.prefix for p in queryset.filter(status=PREFIX_STATUS_ACTIVE)]
-                )
-                reserved_prefixes = netaddr.cidr_merge(
-                    [p.prefix for p in queryset.filter(status=PREFIX_STATUS_RESERVED)]
-                )
-                deprecated_prefixes = netaddr.cidr_merge(
-                    [p.prefix for p in queryset.filter(status=PREFIX_STATUS_DEPRECATED)]
-                )
-
-                # Find all available prefixes by subtracting each of the existing prefix sets from the aggregate prefix.
-                available_prefixes = (
-                    netaddr.IPSet([aggregate.prefix]) -
-                    netaddr.IPSet(active_prefixes) -
-                    netaddr.IPSet(reserved_prefixes) -
-                    netaddr.IPSet(deprecated_prefixes)
-                )
-
-                # Add the size of each metric to the RIR total.
-                stats['total'] += int(aggregate.prefix.size / denominator)
-                stats['active'] += int(netaddr.IPSet(active_prefixes).size / denominator)
-                stats['reserved'] += int(netaddr.IPSet(reserved_prefixes).size / denominator)
-                stats['deprecated'] += int(netaddr.IPSet(deprecated_prefixes).size / denominator)
-                stats['available'] += int(available_prefixes.size / denominator)
-
-            # Calculate the percentage of total space for each prefix status.
-            total = float(stats['total'])
-            stats['percentages'] = {
-                'active': float('{:.2f}'.format(stats['active'] / total * 100)) if total else 0,
-                'reserved': float('{:.2f}'.format(stats['reserved'] / total * 100)) if total else 0,
-                'deprecated': float('{:.2f}'.format(stats['deprecated'] / total * 100)) if total else 0,
-            }
-            stats['percentages']['available'] = (
-                100 -
-                stats['percentages']['active'] -
-                stats['percentages']['reserved'] -
-                stats['percentages']['deprecated']
-            )
-            rir.stats = stats
-            rirs.append(rir)
-
-        return rirs
-
-
-class RIRCreateView(PermissionRequiredMixin, ObjectEditView):
-    permission_required = 'ipam.add_rir'
-    model = RIR
-    model_form = forms.RIRForm
-    default_return_url = 'ipam:rir_list'
-
-
-class RIREditView(RIRCreateView):
-    permission_required = 'ipam.change_rir'
-
-
-class RIRBulkImportView(PermissionRequiredMixin, BulkImportView):
-    permission_required = 'ipam.add_rir'
-    model_form = forms.RIRCSVForm
+@register_model_view(RIR, 'list', path='', detail=False)
+class RIRListView(generic.ObjectListView):
+    queryset = RIR.objects.annotate(
+        aggregate_count=count_related(Aggregate, 'rir')
+    )
+    filterset = filtersets.RIRFilterSet
+    filterset_form = forms.RIRFilterForm
     table = tables.RIRTable
-    default_return_url = 'ipam:rir_list'
 
 
-class RIRBulkDeleteView(PermissionRequiredMixin, BulkDeleteView):
-    permission_required = 'ipam.delete_rir'
-    queryset = RIR.objects.annotate(aggregate_count=Count('aggregates'))
-    filter = filters.RIRFilter
+@register_model_view(RIR)
+class RIRView(GetRelatedModelsMixin, generic.ObjectView):
+    queryset = RIR.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.RIRPanel(),
+            TagsPanel(),
+        ],
+        right_panels=[
+            RelatedObjectsPanel(),
+            CommentsPanel(),
+            CustomFieldsPanel(),
+        ],
+    )
+
+    def get_extra_context(self, request, instance):
+        return {
+            'related_models': self.get_related_models(request, instance),
+        }
+
+
+@register_model_view(RIR, 'add', detail=False)
+@register_model_view(RIR, 'edit')
+class RIREditView(generic.ObjectEditView):
+    queryset = RIR.objects.all()
+    form = forms.RIRForm
+
+
+@register_model_view(RIR, 'delete')
+class RIRDeleteView(generic.ObjectDeleteView):
+    queryset = RIR.objects.all()
+
+
+@register_model_view(RIR, 'bulk_import', path='import', detail=False)
+class RIRBulkImportView(generic.BulkImportView):
+    queryset = RIR.objects.all()
+    model_form = forms.RIRImportForm
+
+
+@register_model_view(RIR, 'bulk_edit', path='edit', detail=False)
+class RIRBulkEditView(generic.BulkEditView):
+    queryset = RIR.objects.annotate(
+        aggregate_count=count_related(Aggregate, 'rir')
+    )
+    filterset = filtersets.RIRFilterSet
     table = tables.RIRTable
-    default_return_url = 'ipam:rir_list'
+    form = forms.RIRBulkEditForm
+
+
+@register_model_view(RIR, 'bulk_rename', path='rename', detail=False)
+class RIRBulkRenameView(generic.BulkRenameView):
+    queryset = RIR.objects.all()
+    filterset = filtersets.RIRFilterSet
+
+
+@register_model_view(RIR, 'bulk_delete', path='delete', detail=False)
+class RIRBulkDeleteView(generic.BulkDeleteView):
+    queryset = RIR.objects.annotate(
+        aggregate_count=count_related(Aggregate, 'rir')
+    )
+    filterset = filtersets.RIRFilterSet
+    table = tables.RIRTable
+
+
+#
+# ASN ranges
+#
+
+@register_model_view(ASNRange, 'list', path='', detail=False)
+class ASNRangeListView(generic.ObjectListView):
+    queryset = ASNRange.objects.annotate_asn_counts()
+    filterset = filtersets.ASNRangeFilterSet
+    filterset_form = forms.ASNRangeFilterForm
+    table = tables.ASNRangeTable
+
+
+@register_model_view(ASNRange)
+class ASNRangeView(generic.ObjectView):
+    queryset = ASNRange.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.ASNRangePanel(),
+            TagsPanel(),
+        ],
+        right_panels=[
+            CommentsPanel(),
+            CustomFieldsPanel(),
+        ],
+    )
+
+
+@register_model_view(ASNRange, 'asns')
+class ASNRangeASNsView(generic.ObjectChildrenView):
+    queryset = ASNRange.objects.all()
+    child_model = ASN
+    table = tables.ASNTable
+    filterset = filtersets.ASNFilterSet
+    filterset_form = forms.ASNFilterForm
+    tab = ViewTab(
+        label=_('ASNs'),
+        badge=lambda x: x.get_child_asns().count(),
+        permission='ipam.view_asn',
+        weight=500
+    )
+
+    def get_children(self, request, parent):
+        return parent.get_child_asns().restrict(request.user, 'view').annotate(
+            site_count=count_related(Site, 'asns'),
+            provider_count=count_related(Provider, 'asns')
+        )
+
+
+@register_model_view(ASNRange, 'add', detail=False)
+@register_model_view(ASNRange, 'edit')
+class ASNRangeEditView(generic.ObjectEditView):
+    queryset = ASNRange.objects.all()
+    form = forms.ASNRangeForm
+
+
+@register_model_view(ASNRange, 'delete')
+class ASNRangeDeleteView(generic.ObjectDeleteView):
+    queryset = ASNRange.objects.all()
+
+
+@register_model_view(ASNRange, 'bulk_import', path='import', detail=False)
+class ASNRangeBulkImportView(generic.BulkImportView):
+    queryset = ASNRange.objects.all()
+    model_form = forms.ASNRangeImportForm
+
+
+@register_model_view(ASNRange, 'bulk_edit', path='edit', detail=False)
+class ASNRangeBulkEditView(generic.BulkEditView):
+    queryset = ASNRange.objects.annotate_asn_counts()
+    filterset = filtersets.ASNRangeFilterSet
+    table = tables.ASNRangeTable
+    form = forms.ASNRangeBulkEditForm
+
+
+@register_model_view(ASNRange, 'bulk_rename', path='rename', detail=False)
+class ASNRangeBulkRenameView(generic.BulkRenameView):
+    queryset = ASNRange.objects.all()
+    filterset = filtersets.ASNRangeFilterSet
+
+
+@register_model_view(ASNRange, 'bulk_delete', path='delete', detail=False)
+class ASNRangeBulkDeleteView(generic.BulkDeleteView):
+    queryset = ASNRange.objects.annotate_asn_counts()
+    filterset = filtersets.ASNRangeFilterSet
+    table = tables.ASNRangeTable
+
+
+#
+# ASNs
+#
+
+@register_model_view(ASN, 'list', path='', detail=False)
+class ASNListView(generic.ObjectListView):
+    queryset = ASN.objects.annotate(
+        site_count=count_related(Site, 'asns'),
+        provider_count=count_related(Provider, 'asns')
+    )
+    filterset = filtersets.ASNFilterSet
+    filterset_form = forms.ASNFilterForm
+    table = tables.ASNTable
+
+
+@register_model_view(ASN)
+class ASNView(GetRelatedModelsMixin, generic.ObjectView):
+    queryset = ASN.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.ASNPanel(),
+            TagsPanel(),
+        ],
+        right_panels=[
+            RelatedObjectsPanel(),
+            CustomFieldsPanel(),
+            CommentsPanel(),
+        ],
+    )
+
+    def get_extra_context(self, request, instance):
+        return {
+            'related_models': self.get_related_models(
+                request,
+                instance,
+                extra=(
+                    (Site.objects.restrict(request.user, 'view').filter(asns__in=[instance]), 'asn_id'),
+                    (Provider.objects.restrict(request.user, 'view').filter(asns__in=[instance]), 'asn_id'),
+                ),
+            ),
+        }
+
+
+@register_model_view(ASN, 'add', detail=False)
+@register_model_view(ASN, 'edit')
+class ASNEditView(generic.ObjectEditView):
+    queryset = ASN.objects.all()
+    form = forms.ASNForm
+
+
+@register_model_view(ASN, 'delete')
+class ASNDeleteView(generic.ObjectDeleteView):
+    queryset = ASN.objects.all()
+
+
+@register_model_view(ASN, 'bulk_import', path='import', detail=False)
+class ASNBulkImportView(generic.BulkImportView):
+    queryset = ASN.objects.all()
+    model_form = forms.ASNImportForm
+
+
+@register_model_view(ASN, 'bulk_edit', path='edit', detail=False)
+class ASNBulkEditView(generic.BulkEditView):
+    queryset = ASN.objects.annotate(
+        site_count=count_related(Site, 'asns')
+    )
+    filterset = filtersets.ASNFilterSet
+    table = tables.ASNTable
+    form = forms.ASNBulkEditForm
+
+
+@register_model_view(ASN, 'bulk_rename', path='rename', detail=False)
+class ASNBulkRenameView(generic.BulkRenameView):
+    queryset = ASN.objects.all()
+    filterset = filtersets.ASNFilterSet
+
+
+@register_model_view(ASN, 'bulk_delete', path='delete', detail=False)
+class ASNBulkDeleteView(generic.BulkDeleteView):
+    queryset = ASN.objects.annotate(
+        site_count=count_related(Site, 'asns')
+    )
+    filterset = filtersets.ASNFilterSet
+    table = tables.ASNTable
 
 
 #
 # Aggregates
 #
 
-class AggregateListView(PermissionRequiredMixin, ObjectListView):
-    permission_required = 'ipam.view_aggregate'
-    queryset = Aggregate.objects.select_related('rir').extra(select={
-        'child_count': 'SELECT COUNT(*) FROM ipam_prefix WHERE ipam_prefix.prefix <<= ipam_aggregate.prefix',
-    })
-    filter = filters.AggregateFilter
-    filter_form = forms.AggregateFilterForm
-    table = tables.AggregateDetailTable
-    template_name = 'ipam/aggregate_list.html'
-
-    def extra_context(self):
-        ipv4_total = 0
-        ipv6_total = 0
-
-        for aggregate in self.queryset:
-            if aggregate.prefix.version == 6:
-                # Report equivalent /64s for IPv6 to keep things sane
-                ipv6_total += int(aggregate.prefix.size / 2 ** 64)
-            else:
-                ipv4_total += aggregate.prefix.size
-
-        return {
-            'ipv4_total': ipv4_total,
-            'ipv6_total': ipv6_total,
-        }
-
-
-class AggregateView(PermissionRequiredMixin, View):
-    permission_required = 'ipam.view_aggregate'
-
-    def get(self, request, pk):
-
-        aggregate = get_object_or_404(Aggregate, pk=pk)
-
-        # Find all child prefixes contained by this aggregate
-        child_prefixes = Prefix.objects.filter(
-            prefix__net_contained_or_equal=str(aggregate.prefix)
-        ).select_related(
-            'site', 'role'
-        ).annotate_depth(
-            limit=0
-        )
-        child_prefixes = add_available_prefixes(aggregate.prefix, child_prefixes)
-
-        prefix_table = tables.PrefixDetailTable(child_prefixes)
-        if request.user.has_perm('ipam.change_prefix') or request.user.has_perm('ipam.delete_prefix'):
-            prefix_table.columns.show('pk')
-
-        paginate = {
-            'paginator_class': EnhancedPaginator,
-            'per_page': request.GET.get('per_page', settings.PAGINATE_COUNT)
-        }
-        RequestConfig(request, paginate).configure(prefix_table)
-
-        # Compile permissions list for rendering the object table
-        permissions = {
-            'add': request.user.has_perm('ipam.add_prefix'),
-            'change': request.user.has_perm('ipam.change_prefix'),
-            'delete': request.user.has_perm('ipam.delete_prefix'),
-        }
-
-        return render(request, 'ipam/aggregate.html', {
-            'aggregate': aggregate,
-            'prefix_table': prefix_table,
-            'permissions': permissions,
-        })
-
-
-class AggregateCreateView(PermissionRequiredMixin, ObjectEditView):
-    permission_required = 'ipam.add_aggregate'
-    model = Aggregate
-    model_form = forms.AggregateForm
-    template_name = 'ipam/aggregate_edit.html'
-    default_return_url = 'ipam:aggregate_list'
-
-
-class AggregateEditView(AggregateCreateView):
-    permission_required = 'ipam.change_aggregate'
-
-
-class AggregateDeleteView(PermissionRequiredMixin, ObjectDeleteView):
-    permission_required = 'ipam.delete_aggregate'
-    model = Aggregate
-    default_return_url = 'ipam:aggregate_list'
-
-
-class AggregateBulkImportView(PermissionRequiredMixin, BulkImportView):
-    permission_required = 'ipam.add_aggregate'
-    model_form = forms.AggregateCSVForm
+@register_model_view(Aggregate, 'list', path='', detail=False)
+class AggregateListView(generic.ObjectListView):
+    queryset = Aggregate.objects.annotate(
+        child_count=RawSQL('SELECT COUNT(*) FROM ipam_prefix WHERE ipam_prefix.prefix <<= ipam_aggregate.prefix', ())
+    )
+    filterset = filtersets.AggregateFilterSet
+    filterset_form = forms.AggregateFilterForm
     table = tables.AggregateTable
-    default_return_url = 'ipam:aggregate_list'
+    actions = (AddObject, BulkImport, BulkExport, BulkEdit, BulkDelete)
 
 
-class AggregateBulkEditView(PermissionRequiredMixin, BulkEditView):
-    permission_required = 'ipam.change_aggregate'
-    queryset = Aggregate.objects.select_related('rir')
-    filter = filters.AggregateFilter
+@register_model_view(Aggregate)
+class AggregateView(generic.ObjectView):
+    queryset = Aggregate.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.AggregatePanel(),
+        ],
+        right_panels=[
+            CustomFieldsPanel(),
+            TagsPanel(),
+            CommentsPanel(),
+        ],
+    )
+
+
+@register_model_view(Aggregate, 'prefixes')
+class AggregatePrefixesView(generic.ObjectChildrenView):
+    queryset = Aggregate.objects.all()
+    child_model = Prefix
+    table = tables.PrefixTable
+    filterset = filtersets.PrefixFilterSet
+    filterset_form = forms.PrefixFilterForm
+    template_name = 'ipam/aggregate/prefixes.html'
+    tab = ViewTab(
+        label=_('Prefixes'),
+        badge=lambda x: x.get_child_prefixes().count(),
+        permission='ipam.view_prefix',
+        weight=500
+    )
+
+    def get_children(self, request, parent):
+        return Prefix.objects.restrict(request.user, 'view').filter(
+            prefix__net_contained_or_equal=str(parent.prefix)
+        ).prefetch_related('scope', 'role', 'tenant', 'tenant__group', 'vlan')
+
+    def prep_table_data(self, request, queryset, parent):
+        # Determine whether to show assigned prefixes, available prefixes, or both
+        show_available = bool(request.GET.get('show_available', 'true') == 'true')
+        show_assigned = bool(request.GET.get('show_assigned', 'true') == 'true')
+
+        return add_requested_prefixes(parent.prefix, queryset, show_available, show_assigned)
+
+    def get_extra_context(self, request, instance):
+        return {
+            'bulk_querystring': f'within={instance.prefix}',
+            'first_available_prefix': instance.get_first_available_prefix(),
+            'show_available': bool(request.GET.get('show_available', 'true') == 'true'),
+            'show_assigned': bool(request.GET.get('show_assigned', 'true') == 'true'),
+        }
+
+
+@register_model_view(Aggregate, 'add', detail=False)
+@register_model_view(Aggregate, 'edit')
+class AggregateEditView(generic.ObjectEditView):
+    queryset = Aggregate.objects.all()
+    form = forms.AggregateForm
+
+
+@register_model_view(Aggregate, 'delete')
+class AggregateDeleteView(generic.ObjectDeleteView):
+    queryset = Aggregate.objects.all()
+
+
+@register_model_view(Aggregate, 'bulk_import', path='import', detail=False)
+class AggregateBulkImportView(generic.BulkImportView):
+    queryset = Aggregate.objects.all()
+    model_form = forms.AggregateImportForm
+
+
+@register_model_view(Aggregate, 'bulk_edit', path='edit', detail=False)
+class AggregateBulkEditView(generic.BulkEditView):
+    queryset = Aggregate.objects.annotate(
+        child_count=RawSQL('SELECT COUNT(*) FROM ipam_prefix WHERE ipam_prefix.prefix <<= ipam_aggregate.prefix', ())
+    )
+    filterset = filtersets.AggregateFilterSet
     table = tables.AggregateTable
     form = forms.AggregateBulkEditForm
-    default_return_url = 'ipam:aggregate_list'
 
 
-class AggregateBulkDeleteView(PermissionRequiredMixin, BulkDeleteView):
-    permission_required = 'ipam.delete_aggregate'
-    queryset = Aggregate.objects.select_related('rir')
-    filter = filters.AggregateFilter
+@register_model_view(Aggregate, 'bulk_delete', path='delete', detail=False)
+class AggregateBulkDeleteView(generic.BulkDeleteView):
+    queryset = Aggregate.objects.annotate(
+        child_count=RawSQL('SELECT COUNT(*) FROM ipam_prefix WHERE ipam_prefix.prefix <<= ipam_aggregate.prefix', ())
+    )
+    filterset = filtersets.AggregateFilterSet
     table = tables.AggregateTable
-    default_return_url = 'ipam:aggregate_list'
 
 
 #
 # Prefix/VLAN roles
 #
 
-class RoleListView(PermissionRequiredMixin, ObjectListView):
-    permission_required = 'ipam.view_role'
+@register_model_view(Role, 'list', path='', detail=False)
+class RoleListView(generic.ObjectListView):
+    queryset = Role.objects.annotate(
+        prefix_count=count_related(Prefix, 'role'),
+        iprange_count=count_related(IPRange, 'role'),
+        vlan_count=count_related(VLAN, 'role')
+    )
+    filterset = filtersets.RoleFilterSet
+    filterset_form = forms.RoleFilterForm
+    table = tables.RoleTable
+
+
+@register_model_view(Role)
+class RoleView(GetRelatedModelsMixin, generic.ObjectView):
     queryset = Role.objects.all()
-    table = tables.RoleTable
-    template_name = 'ipam/role_list.html'
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.RolePanel(),
+            TagsPanel(),
+        ],
+        right_panels=[
+            RelatedObjectsPanel(),
+            CommentsPanel(),
+            CustomFieldsPanel(),
+        ],
+    )
+
+    def get_extra_context(self, request, instance):
+        return {
+            'related_models': self.get_related_models(request, instance),
+        }
 
 
-class RoleCreateView(PermissionRequiredMixin, ObjectEditView):
-    permission_required = 'ipam.add_role'
-    model = Role
-    model_form = forms.RoleForm
-    default_return_url = 'ipam:role_list'
-
-
-class RoleEditView(RoleCreateView):
-    permission_required = 'ipam.change_role'
-
-
-class RoleBulkImportView(PermissionRequiredMixin, BulkImportView):
-    permission_required = 'ipam.add_role'
-    model_form = forms.RoleCSVForm
-    table = tables.RoleTable
-    default_return_url = 'ipam:role_list'
-
-
-class RoleBulkDeleteView(PermissionRequiredMixin, BulkDeleteView):
-    permission_required = 'ipam.delete_role'
+@register_model_view(Role, 'add', detail=False)
+@register_model_view(Role, 'edit')
+class RoleEditView(generic.ObjectEditView):
     queryset = Role.objects.all()
+    form = forms.RoleForm
+
+
+@register_model_view(Role, 'delete')
+class RoleDeleteView(generic.ObjectDeleteView):
+    queryset = Role.objects.all()
+
+
+@register_model_view(Role, 'bulk_import', path='import', detail=False)
+class RoleBulkImportView(generic.BulkImportView):
+    queryset = Role.objects.all()
+    model_form = forms.RoleImportForm
+
+
+@register_model_view(Role, 'bulk_edit', path='edit', detail=False)
+class RoleBulkEditView(generic.BulkEditView):
+    queryset = Role.objects.all()
+    filterset = filtersets.RoleFilterSet
     table = tables.RoleTable
-    default_return_url = 'ipam:role_list'
+    form = forms.RoleBulkEditForm
+
+
+@register_model_view(Role, 'bulk_rename', path='rename', detail=False)
+class RoleBulkRenameView(generic.BulkRenameView):
+    queryset = Role.objects.all()
+    filterset = filtersets.RoleFilterSet
+
+
+@register_model_view(Role, 'bulk_delete', path='delete', detail=False)
+class RoleBulkDeleteView(generic.BulkDeleteView):
+    queryset = Role.objects.all()
+    filterset = filtersets.RoleFilterSet
+    table = tables.RoleTable
 
 
 #
 # Prefixes
 #
 
-class PrefixListView(PermissionRequiredMixin, ObjectListView):
-    permission_required = 'ipam.view_prefix'
-    queryset = Prefix.objects.select_related('site', 'vrf__tenant', 'tenant', 'vlan', 'role')
-    filter = filters.PrefixFilter
-    filter_form = forms.PrefixFilterForm
-    table = tables.PrefixDetailTable
+@register_model_view(Prefix, 'list', path='', detail=False)
+class PrefixListView(generic.ObjectListView):
+    queryset = Prefix.objects.all()
+    filterset = filtersets.PrefixFilterSet
+    filterset_form = forms.PrefixFilterForm
+    table = tables.PrefixTable
     template_name = 'ipam/prefix_list.html'
-
-    def alter_queryset(self, request):
-        # Show only top-level prefixes by default (unless searching)
-        limit = None if request.GET.get('expand') or request.GET.get('q') else 0
-        return self.queryset.annotate_depth(limit=limit)
+    actions = (AddObject, BulkImport, BulkExport, BulkEdit, BulkDelete)
 
 
-class PrefixView(PermissionRequiredMixin, View):
-    permission_required = 'ipam.view_prefix'
+@register_model_view(Prefix)
+class PrefixView(generic.ObjectView):
+    queryset = Prefix.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.PrefixPanel(),
+        ],
+        right_panels=[
+            TemplatePanel('ipam/panels/prefix_addressing.html'),
+            CustomFieldsPanel(),
+            TagsPanel(),
+            CommentsPanel(),
+        ],
+        bottom_panels=[
+            ContextTablePanel('duplicate_prefix_table', title=_('Duplicate prefixes')),
+            ContextTablePanel('parent_prefix_table', title=_('Parent prefixes')),
+        ],
+    )
 
-    def get(self, request, pk):
-
-        prefix = get_object_or_404(Prefix.objects.select_related(
-            'vrf', 'site__region', 'tenant__group', 'vlan__group', 'role'
-        ), pk=pk)
-
-        try:
-            aggregate = Aggregate.objects.get(prefix__net_contains_or_equals=str(prefix.prefix))
-        except Aggregate.DoesNotExist:
-            aggregate = None
-
+    def get_extra_context(self, request, instance):
         # Parent prefixes table
-        parent_prefixes = Prefix.objects.filter(
-            Q(vrf=prefix.vrf) | Q(vrf__isnull=True)
+        parent_prefixes = Prefix.objects.restrict(request.user, 'view').filter(
+            Q(vrf=instance.vrf) | Q(vrf__isnull=True, status=PrefixStatusChoices.STATUS_CONTAINER)
         ).filter(
-            prefix__net_contains=str(prefix.prefix)
-        ).select_related(
-            'site', 'role'
-        ).annotate_depth()
-        parent_prefix_table = tables.PrefixTable(list(parent_prefixes), orderable=False)
-        parent_prefix_table.exclude = ('vrf',)
+            prefix__net_contains=str(instance.prefix)
+        ).prefetch_related(
+            'scope', 'role', 'tenant', 'vlan',
+        )
+        parent_prefix_table = tables.PrefixTable(
+            list(parent_prefixes),
+            exclude=('vrf', 'utilization'),
+            orderable=False
+        )
+        parent_prefix_table.configure(request)
 
         # Duplicate prefixes table
-        duplicate_prefixes = Prefix.objects.filter(
-            vrf=prefix.vrf, prefix=str(prefix.prefix)
+        duplicate_prefixes = Prefix.objects.restrict(request.user, 'view').filter(
+            vrf=instance.vrf, prefix=str(instance.prefix)
         ).exclude(
-            pk=prefix.pk
-        ).select_related(
-            'site', 'role'
+            pk=instance.pk
+        ).prefetch_related(
+            'scope', 'role', 'tenant', 'vlan',
         )
-        duplicate_prefix_table = tables.PrefixTable(list(duplicate_prefixes), orderable=False)
-        duplicate_prefix_table.exclude = ('vrf',)
+        duplicate_prefix_table = tables.PrefixTable(
+            list(duplicate_prefixes),
+            exclude=('vrf', 'utilization'),
+            orderable=False
+        )
+        duplicate_prefix_table.configure(request)
 
-        return render(request, 'ipam/prefix.html', {
-            'prefix': prefix,
-            'aggregate': aggregate,
+        context = {
             'parent_prefix_table': parent_prefix_table,
-            'duplicate_prefix_table': duplicate_prefix_table,
-        })
-
-
-class PrefixPrefixesView(PermissionRequiredMixin, View):
-    permission_required = 'ipam.view_prefix'
-
-    def get(self, request, pk):
-
-        prefix = get_object_or_404(Prefix.objects.all(), pk=pk)
-
-        # Child prefixes table
-        child_prefixes = prefix.get_child_prefixes().select_related(
-            'site', 'vlan', 'role',
-        ).annotate_depth(limit=0)
-
-        # Annotate available prefixes
-        if child_prefixes:
-            child_prefixes = add_available_prefixes(prefix.prefix, child_prefixes)
-
-        prefix_table = tables.PrefixDetailTable(child_prefixes)
-        if request.user.has_perm('ipam.change_prefix') or request.user.has_perm('ipam.delete_prefix'):
-            prefix_table.columns.show('pk')
-
-        paginate = {
-            'paginator_class': EnhancedPaginator,
-            'per_page': request.GET.get('per_page', settings.PAGINATE_COUNT)
         }
-        RequestConfig(request, paginate).configure(prefix_table)
-
-        # Compile permissions list for rendering the object table
-        permissions = {
-            'add': request.user.has_perm('ipam.add_prefix'),
-            'change': request.user.has_perm('ipam.change_prefix'),
-            'delete': request.user.has_perm('ipam.delete_prefix'),
-        }
-
-        return render(request, 'ipam/prefix_prefixes.html', {
-            'prefix': prefix,
-            'first_available_prefix': prefix.get_first_available_prefix(),
-            'prefix_table': prefix_table,
-            'permissions': permissions,
-            'bulk_querystring': 'vrf_id={}&within={}'.format(prefix.vrf.pk if prefix.vrf else '0', prefix.prefix),
-            'active_tab': 'prefixes',
-        })
+        if duplicate_prefixes.exists():
+            context['duplicate_prefix_table'] = duplicate_prefix_table
+        return context
 
 
-class PrefixIPAddressesView(PermissionRequiredMixin, View):
-    permission_required = 'ipam.view_prefix'
-
-    def get(self, request, pk):
-
-        prefix = get_object_or_404(Prefix.objects.all(), pk=pk)
-
-        # Find all IPAddresses belonging to this Prefix
-        ipaddresses = prefix.get_child_ips().select_related(
-            'vrf', 'interface__device', 'primary_ip4_for', 'primary_ip6_for'
-        )
-        ipaddresses = add_available_ipaddresses(prefix.prefix, ipaddresses, prefix.is_pool)
-
-        ip_table = tables.IPAddressTable(ipaddresses)
-        if request.user.has_perm('ipam.change_ipaddress') or request.user.has_perm('ipam.delete_ipaddress'):
-            ip_table.columns.show('pk')
-
-        paginate = {
-            'paginator_class': EnhancedPaginator,
-            'per_page': request.GET.get('per_page', settings.PAGINATE_COUNT)
-        }
-        RequestConfig(request, paginate).configure(ip_table)
-
-        # Compile permissions list for rendering the object table
-        permissions = {
-            'add': request.user.has_perm('ipam.add_ipaddress'),
-            'change': request.user.has_perm('ipam.change_ipaddress'),
-            'delete': request.user.has_perm('ipam.delete_ipaddress'),
-        }
-
-        return render(request, 'ipam/prefix_ipaddresses.html', {
-            'prefix': prefix,
-            'first_available_ip': prefix.get_first_available_ip(),
-            'ip_table': ip_table,
-            'permissions': permissions,
-            'bulk_querystring': 'vrf_id={}&parent={}'.format(prefix.vrf.pk if prefix.vrf else '0', prefix.prefix),
-            'active_tab': 'ip-addresses',
-        })
-
-
-class PrefixCreateView(PermissionRequiredMixin, ObjectEditView):
-    permission_required = 'ipam.add_prefix'
-    model = Prefix
-    model_form = forms.PrefixForm
-    template_name = 'ipam/prefix_edit.html'
-    default_return_url = 'ipam:prefix_list'
-
-
-class PrefixEditView(PrefixCreateView):
-    permission_required = 'ipam.change_prefix'
-
-
-class PrefixDeleteView(PermissionRequiredMixin, ObjectDeleteView):
-    permission_required = 'ipam.delete_prefix'
-    model = Prefix
-    template_name = 'ipam/prefix_delete.html'
-    default_return_url = 'ipam:prefix_list'
-
-
-class PrefixBulkImportView(PermissionRequiredMixin, BulkImportView):
-    permission_required = 'ipam.add_prefix'
-    model_form = forms.PrefixCSVForm
+@register_model_view(Prefix, 'prefixes')
+class PrefixPrefixesView(generic.ObjectChildrenView):
+    queryset = Prefix.objects.all()
+    child_model = Prefix
     table = tables.PrefixTable
-    default_return_url = 'ipam:prefix_list'
+    filterset = filtersets.PrefixFilterSet
+    filterset_form = forms.PrefixFilterForm
+    template_name = 'ipam/prefix/prefixes.html'
+    tab = ViewTab(
+        label=_('Child Prefixes'),
+        badge=lambda x: x.get_child_prefixes().count(),
+        permission='ipam.view_prefix',
+        weight=500
+    )
+
+    def get_children(self, request, parent):
+        return parent.get_child_prefixes().restrict(request.user, 'view').prefetch_related(
+            'scope', 'vrf', 'vlan', 'role', 'tenant', 'tenant__group'
+        )
+
+    def prep_table_data(self, request, queryset, parent):
+        # Determine whether to show assigned prefixes, available prefixes, or both
+        show_available = bool(request.GET.get('show_available', 'true') == 'true')
+        show_assigned = bool(request.GET.get('show_assigned', 'true') == 'true')
+
+        return add_requested_prefixes(parent.prefix, queryset, show_available, show_assigned)
+
+    def get_extra_context(self, request, instance):
+        return {
+            'bulk_querystring': f"vrf_id={instance.vrf.pk if instance.vrf else '0'}&within={instance.prefix}",
+            'first_available_prefix': instance.get_first_available_prefix(),
+            'show_available': bool(request.GET.get('show_available', 'true') == 'true'),
+            'show_assigned': bool(request.GET.get('show_assigned', 'true') == 'true'),
+        }
 
 
-class PrefixBulkEditView(PermissionRequiredMixin, BulkEditView):
-    permission_required = 'ipam.change_prefix'
-    queryset = Prefix.objects.select_related('site', 'vrf__tenant', 'tenant', 'vlan', 'role')
-    filter = filters.PrefixFilter
+@register_model_view(Prefix, 'ipranges', path='ip-ranges')
+class PrefixIPRangesView(generic.ObjectChildrenView):
+    queryset = Prefix.objects.all()
+    child_model = IPRange
+    table = tables.IPRangeTable
+    filterset = filtersets.IPRangeFilterSet
+    filterset_form = forms.IPRangeFilterForm
+    template_name = 'ipam/prefix/ip_ranges.html'
+    tab = ViewTab(
+        label=_('Child Ranges'),
+        badge=lambda x: x.get_child_ranges().count(),
+        permission='ipam.view_iprange',
+        weight=600
+    )
+
+    def get_children(self, request, parent):
+        return parent.get_child_ranges().restrict(request.user, 'view').prefetch_related(
+            'tenant__group',
+        )
+
+    def get_extra_context(self, request, instance):
+        return {
+            'bulk_querystring': f"vrf_id={instance.vrf.pk if instance.vrf else '0'}&parent={instance.prefix}",
+            'first_available_ip': instance.get_first_available_ip(),
+        }
+
+
+@register_model_view(Prefix, 'ipaddresses', path='ip-addresses')
+class PrefixIPAddressesView(generic.ObjectChildrenView):
+    queryset = Prefix.objects.all()
+    child_model = IPAddress
+    table = tables.AnnotatedIPAddressTable
+    filterset = filtersets.IPAddressFilterSet
+    filterset_form = forms.IPAddressFilterForm
+    template_name = 'ipam/prefix/ip_addresses.html'
+    tab = ViewTab(
+        label=_('IP Addresses'),
+        badge=lambda x: x.get_child_ips().count(),
+        permission='ipam.view_ipaddress',
+        weight=700
+    )
+
+    def get_children(self, request, parent):
+        return parent.get_child_ips().restrict(request.user, 'view').prefetch_related('vrf', 'tenant', 'tenant__group')
+
+    def prep_table_data(self, request, queryset, parent):
+        if not request.GET.get('q') and not get_table_ordering(request, self.table):
+            return annotate_ip_space(parent)
+        return queryset
+
+    def get_extra_context(self, request, instance):
+        return {
+            'bulk_querystring': f"vrf_id={instance.vrf.pk if instance.vrf else '0'}&parent={instance.prefix}",
+            'first_available_ip': instance.get_first_available_ip(),
+        }
+
+
+@register_model_view(Prefix, 'add', detail=False)
+@register_model_view(Prefix, 'edit')
+class PrefixEditView(generic.ObjectEditView):
+    queryset = Prefix.objects.all()
+    form = forms.PrefixForm
+
+
+@register_model_view(Prefix, 'delete')
+class PrefixDeleteView(generic.ObjectDeleteView):
+    queryset = Prefix.objects.all()
+
+
+@register_model_view(Prefix, 'bulk_import', path='import', detail=False)
+class PrefixBulkImportView(generic.BulkImportView):
+    queryset = Prefix.objects.all()
+    model_form = forms.PrefixImportForm
+
+
+@register_model_view(Prefix, 'bulk_edit', path='edit', detail=False)
+class PrefixBulkEditView(generic.BulkEditView):
+    queryset = Prefix.objects.prefetch_related('vrf__tenant')
+    filterset = filtersets.PrefixFilterSet
     table = tables.PrefixTable
     form = forms.PrefixBulkEditForm
-    default_return_url = 'ipam:prefix_list'
 
 
-class PrefixBulkDeleteView(PermissionRequiredMixin, BulkDeleteView):
-    permission_required = 'ipam.delete_prefix'
-    queryset = Prefix.objects.select_related('site', 'vrf__tenant', 'tenant', 'vlan', 'role')
-    filter = filters.PrefixFilter
+@register_model_view(Prefix, 'bulk_delete', path='delete', detail=False)
+class PrefixBulkDeleteView(generic.BulkDeleteView):
+    queryset = Prefix.objects.prefetch_related('vrf__tenant')
+    filterset = filtersets.PrefixFilterSet
     table = tables.PrefixTable
-    default_return_url = 'ipam:prefix_list'
+
+
+#
+# IP Ranges
+#
+
+@register_model_view(IPRange, 'list', path='', detail=False)
+class IPRangeListView(generic.ObjectListView):
+    queryset = IPRange.objects.all()
+    filterset = filtersets.IPRangeFilterSet
+    filterset_form = forms.IPRangeFilterForm
+    table = tables.IPRangeTable
+
+
+@register_model_view(IPRange)
+class IPRangeView(generic.ObjectView):
+    queryset = IPRange.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.IPRangePanel(),
+        ],
+        right_panels=[
+            TagsPanel(),
+            CustomFieldsPanel(),
+            CommentsPanel(),
+        ],
+        bottom_panels=[
+            ContextTablePanel('parent_prefixes_table', title=_('Parent prefixes')),
+        ],
+    )
+
+    def get_extra_context(self, request, instance):
+
+        # Parent prefixes table
+        parent_prefixes = Prefix.objects.restrict(request.user, 'view').filter(
+            Q(prefix__net_contains_or_equals=str(instance.start_address.ip)),
+            Q(prefix__net_contains_or_equals=str(instance.end_address.ip)),
+            vrf=instance.vrf
+        ).prefetch_related(
+            'scope', 'role', 'tenant', 'vlan', 'role'
+        )
+        parent_prefixes_table = tables.PrefixTable(
+            list(parent_prefixes),
+            exclude=('vrf', 'utilization'),
+            orderable=False
+        )
+        parent_prefixes_table.configure(request)
+
+        return {
+            'parent_prefixes_table': parent_prefixes_table,
+        }
+
+
+@register_model_view(IPRange, 'ipaddresses', path='ip-addresses')
+class IPRangeIPAddressesView(generic.ObjectChildrenView):
+    queryset = IPRange.objects.all()
+    child_model = IPAddress
+    table = tables.IPAddressTable
+    filterset = filtersets.IPAddressFilterSet
+    filterset_form = forms.IPRangeFilterForm
+    template_name = 'ipam/iprange/ip_addresses.html'
+    tab = ViewTab(
+        label=_('IP Addresses'),
+        badge=lambda x: x.get_child_ips().count(),
+        permission='ipam.view_ipaddress',
+        weight=500
+    )
+
+    def get_children(self, request, parent):
+        return parent.get_child_ips().restrict(request.user, 'view')
+
+
+@register_model_view(IPRange, 'add', detail=False)
+@register_model_view(IPRange, 'edit')
+class IPRangeEditView(generic.ObjectEditView):
+    queryset = IPRange.objects.all()
+    form = forms.IPRangeForm
+
+
+@register_model_view(IPRange, 'delete')
+class IPRangeDeleteView(generic.ObjectDeleteView):
+    queryset = IPRange.objects.all()
+
+
+@register_model_view(IPRange, 'bulk_import', path='import', detail=False)
+class IPRangeBulkImportView(generic.BulkImportView):
+    queryset = IPRange.objects.all()
+    model_form = forms.IPRangeImportForm
+
+
+@register_model_view(IPRange, 'bulk_edit', path='edit', detail=False)
+class IPRangeBulkEditView(generic.BulkEditView):
+    queryset = IPRange.objects.all()
+    filterset = filtersets.IPRangeFilterSet
+    table = tables.IPRangeTable
+    form = forms.IPRangeBulkEditForm
+
+
+@register_model_view(IPRange, 'bulk_rename', path='rename', detail=False)
+class IPRangeBulkRenameView(generic.BulkRenameView):
+    queryset = IPRange.objects.all()
+    filterset = filtersets.IPRangeFilterSet
+
+
+@register_model_view(IPRange, 'bulk_delete', path='delete', detail=False)
+class IPRangeBulkDeleteView(generic.BulkDeleteView):
+    queryset = IPRange.objects.all()
+    filterset = filtersets.IPRangeFilterSet
+    table = tables.IPRangeTable
 
 
 #
 # IP addresses
 #
 
-class IPAddressListView(PermissionRequiredMixin, ObjectListView):
-    permission_required = 'ipam.view_ipaddress'
-    queryset = IPAddress.objects.select_related(
-        'vrf__tenant', 'tenant', 'nat_inside'
-    ).prefetch_related(
-        'interface__device', 'interface__virtual_machine'
+@register_model_view(IPAddress, 'list', path='', detail=False)
+class IPAddressListView(generic.ObjectListView):
+    queryset = IPAddress.objects.all()
+    filterset = filtersets.IPAddressFilterSet
+    filterset_form = forms.IPAddressFilterForm
+    table = tables.IPAddressTable
+    actions = (AddObject, BulkImport, BulkExport, BulkEdit, BulkDelete)
+
+
+@register_model_view(IPAddress)
+class IPAddressView(generic.ObjectView):
+    queryset = IPAddress.objects.prefetch_related('vrf__tenant', 'tenant')
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.IPAddressPanel(),
+            TagsPanel(),
+            CustomFieldsPanel(),
+            CommentsPanel(),
+        ],
+        right_panels=[
+            ContextTablePanel('parent_prefixes_table', title=_('Parent prefixes')),
+            ContextTablePanel('duplicate_ips_table', title=_('Duplicate IPs')),
+            ObjectsTablePanel(
+                'ipam.service',
+                filters={'ip_address_id': lambda ctx: ctx['object'].pk},
+                title=_('Application services'),
+            ),
+        ],
     )
-    filter = filters.IPAddressFilter
-    filter_form = forms.IPAddressFilterForm
-    table = tables.IPAddressDetailTable
-    template_name = 'ipam/ipaddress_list.html'
 
-
-class IPAddressView(PermissionRequiredMixin, View):
-    permission_required = 'ipam.view_ipaddress'
-
-    def get(self, request, pk):
-
-        ipaddress = get_object_or_404(IPAddress.objects.select_related('vrf__tenant', 'tenant'), pk=pk)
-
+    def get_extra_context(self, request, instance):
         # Parent prefixes table
-        parent_prefixes = Prefix.objects.filter(
-            vrf=ipaddress.vrf, prefix__net_contains=str(ipaddress.address.ip)
-        ).select_related(
-            'site', 'role'
+        parent_prefixes = Prefix.objects.restrict(request.user, 'view').filter(
+            vrf=instance.vrf,
+            prefix__net_contains_or_equals=str(instance.address.ip)
+        ).prefetch_related(
+            'scope', 'role'
         )
-        parent_prefixes_table = tables.PrefixTable(list(parent_prefixes), orderable=False)
-        parent_prefixes_table.exclude = ('vrf',)
+        parent_prefixes_table = tables.PrefixTable(
+            list(parent_prefixes),
+            exclude=('vrf', 'utilization'),
+            orderable=False
+        )
+        parent_prefixes_table.configure(request)
 
         # Duplicate IPs table
-        duplicate_ips = IPAddress.objects.filter(
-            vrf=ipaddress.vrf, address=str(ipaddress.address)
+        duplicate_ips = IPAddress.objects.restrict(request.user, 'view').filter(
+            vrf=instance.vrf,
+            address=str(instance.address)
         ).exclude(
-            pk=ipaddress.pk
-        ).select_related(
-            'nat_inside'
+            pk=instance.pk
         ).prefetch_related(
-            'interface__device'
+            'nat_inside'
         )
         # Exclude anycast IPs if this IP is anycast
-        if ipaddress.role == IPADDRESS_ROLE_ANYCAST:
-            duplicate_ips = duplicate_ips.exclude(role=IPADDRESS_ROLE_ANYCAST)
-        duplicate_ips_table = tables.IPAddressTable(list(duplicate_ips), orderable=False)
+        if instance.role == IPAddressRoleChoices.ROLE_ANYCAST:
+            duplicate_ips = duplicate_ips.exclude(role=IPAddressRoleChoices.ROLE_ANYCAST)
+        # Limit to a maximum of 10 duplicates displayed here
+        duplicate_ips_table = tables.IPAddressTable(duplicate_ips[:10], orderable=False)
+        duplicate_ips_table.configure(request)
 
-        # Related IP table
-        related_ips = IPAddress.objects.prefetch_related(
-            'interface__device'
-        ).exclude(
-            address=str(ipaddress.address)
-        ).filter(
-            vrf=ipaddress.vrf, address__net_contained_or_equal=str(ipaddress.address)
-        )
-        related_ips_table = tables.IPAddressTable(list(related_ips), orderable=False)
-
-        return render(request, 'ipam/ipaddress.html', {
-            'ipaddress': ipaddress,
+        context = {
             'parent_prefixes_table': parent_prefixes_table,
-            'duplicate_ips_table': duplicate_ips_table,
-            'related_ips_table': related_ips_table,
-        })
+        }
+        if duplicate_ips.exists():
+            context['duplicate_ips_table'] = duplicate_ips_table
+        return context
 
 
-class IPAddressCreateView(PermissionRequiredMixin, ObjectEditView):
-    permission_required = 'ipam.add_ipaddress'
-    model = IPAddress
-    model_form = forms.IPAddressForm
+@register_model_view(IPAddress, 'add', detail=False)
+@register_model_view(IPAddress, 'edit')
+class IPAddressEditView(generic.ObjectEditView):
+    queryset = IPAddress.objects.all()
+    form = forms.IPAddressForm
     template_name = 'ipam/ipaddress_edit.html'
-    default_return_url = 'ipam:ipaddress_list'
 
-    def alter_obj(self, obj, request, url_args, url_kwargs):
+    def alter_object(self, obj, request, url_args, url_kwargs):
 
-        interface_id = request.GET.get('interface')
-        if interface_id:
+        if 'interface' in request.GET:
             try:
-                obj.interface = Interface.objects.get(pk=interface_id)
+                obj.assigned_object = Interface.objects.get(pk=request.GET['interface'])
             except (ValueError, Interface.DoesNotExist):
+                pass
+
+        elif 'vminterface' in request.GET:
+            try:
+                obj.assigned_object = VMInterface.objects.get(pk=request.GET['vminterface'])
+            except (ValueError, VMInterface.DoesNotExist):
+                pass
+
+        elif 'fhrpgroup' in request.GET:
+            try:
+                obj.assigned_object = FHRPGroup.objects.get(pk=request.GET['fhrpgroup'])
+            except (ValueError, FHRPGroup.DoesNotExist):
                 pass
 
         return obj
 
+    def get_extra_addanother_params(self, request):
+        if 'interface' in request.GET:
+            return {'interface': request.GET['interface']}
+        if 'vminterface' in request.GET:
+            return {'vminterface': request.GET['vminterface']}
+        return {}
 
-class IPAddressEditView(IPAddressCreateView):
-    permission_required = 'ipam.change_ipaddress'
 
-
-class IPAddressAssignView(PermissionRequiredMixin, View):
+# TODO: Standardize or remove this view
+@register_model_view(IPAddress, 'assign', path='assign', detail=False)
+class IPAddressAssignView(generic.ObjectView):
     """
     Search for IPAddresses to be assigned to an Interface.
     """
-    permission_required = 'ipam.change_ipaddress'
+    queryset = IPAddress.objects.all()
 
     def dispatch(self, request, *args, **kwargs):
 
         # Redirect user if an interface has not been provided
-        if 'interface' not in request.GET:
+        if 'interface' not in request.GET and 'vminterface' not in request.GET:
             return redirect('ipam:ipaddress_add')
 
         return super().dispatch(request, *args, **kwargs)
 
     def get(self, request):
-
         form = forms.IPAddressAssignForm()
 
         return render(request, 'ipam/ipaddress_assign.html', {
@@ -736,301 +1136,739 @@ class IPAddressAssignView(PermissionRequiredMixin, View):
         })
 
     def post(self, request):
-
         form = forms.IPAddressAssignForm(request.POST)
         table = None
 
         if form.is_valid():
-
-            queryset = IPAddress.objects.select_related(
-                'vrf', 'tenant', 'interface__device', 'interface__virtual_machine'
-            ).filter(
-                vrf=form.cleaned_data['vrf'],
-                address__istartswith=form.cleaned_data['address'],
-            )[:100]  # Limit to 100 results
-            table = tables.IPAddressAssignTable(queryset)
+            addresses = self.queryset.prefetch_related('vrf', 'tenant')
+            # Limit to 100 results
+            addresses = filtersets.IPAddressFilterSet(request.POST, addresses).qs[:100]
+            table = tables.IPAddressAssignTable(addresses)
+            table.configure(request)
 
         return render(request, 'ipam/ipaddress_assign.html', {
             'form': form,
             'table': table,
-            'return_url': request.GET.get('return_url', ''),
+            'return_url': request.GET.get('return_url'),
         })
 
 
-class IPAddressDeleteView(PermissionRequiredMixin, ObjectDeleteView):
-    permission_required = 'ipam.delete_ipaddress'
-    model = IPAddress
-    default_return_url = 'ipam:ipaddress_list'
+@register_model_view(IPAddress, 'delete')
+class IPAddressDeleteView(generic.ObjectDeleteView):
+    queryset = IPAddress.objects.all()
 
 
-class IPAddressBulkCreateView(PermissionRequiredMixin, BulkCreateView):
-    permission_required = 'ipam.add_ipaddress'
+@register_model_view(IPAddress, 'bulk_add', path='bulk-add', detail=False)
+class IPAddressBulkCreateView(generic.BulkCreateView):
+    queryset = IPAddress.objects.all()
     form = forms.IPAddressBulkCreateForm
     model_form = forms.IPAddressBulkAddForm
     pattern_target = 'address'
     template_name = 'ipam/ipaddress_bulk_add.html'
-    default_return_url = 'ipam:ipaddress_list'
 
 
-class IPAddressBulkImportView(PermissionRequiredMixin, BulkImportView):
-    permission_required = 'ipam.add_ipaddress'
-    model_form = forms.IPAddressCSVForm
-    table = tables.IPAddressTable
-    default_return_url = 'ipam:ipaddress_list'
+@register_model_view(IPAddress, 'bulk_import', path='import', detail=False)
+class IPAddressBulkImportView(generic.BulkImportView):
+    queryset = IPAddress.objects.all()
+    model_form = forms.IPAddressImportForm
 
 
-class IPAddressBulkEditView(PermissionRequiredMixin, BulkEditView):
-    permission_required = 'ipam.change_ipaddress'
-    queryset = IPAddress.objects.select_related('vrf__tenant', 'tenant').prefetch_related('interface__device')
-    filter = filters.IPAddressFilter
+@register_model_view(IPAddress, 'bulk_edit', path='edit', detail=False)
+class IPAddressBulkEditView(generic.BulkEditView):
+    queryset = IPAddress.objects.prefetch_related('vrf__tenant')
+    filterset = filtersets.IPAddressFilterSet
     table = tables.IPAddressTable
     form = forms.IPAddressBulkEditForm
-    default_return_url = 'ipam:ipaddress_list'
 
 
-class IPAddressBulkDeleteView(PermissionRequiredMixin, BulkDeleteView):
-    permission_required = 'ipam.delete_ipaddress'
-    queryset = IPAddress.objects.select_related('vrf__tenant', 'tenant').prefetch_related('interface__device')
-    filter = filters.IPAddressFilter
+@register_model_view(IPAddress, 'bulk_delete', path='delete', detail=False)
+class IPAddressBulkDeleteView(generic.BulkDeleteView):
+    queryset = IPAddress.objects.prefetch_related('vrf__tenant')
+    filterset = filtersets.IPAddressFilterSet
     table = tables.IPAddressTable
-    default_return_url = 'ipam:ipaddress_list'
+
+
+@register_model_view(IPAddress, 'related_ips', path='related-ip-addresses')
+class IPAddressRelatedIPsView(generic.ObjectChildrenView):
+    queryset = IPAddress.objects.prefetch_related('vrf__tenant', 'tenant')
+    child_model = IPAddress
+    table = tables.IPAddressTable
+    filterset = filtersets.IPAddressFilterSet
+    filterset_form = forms.IPAddressFilterForm
+    tab = ViewTab(
+        label=_('Related IPs'),
+        badge=lambda x: x.get_related_ips().count(),
+        weight=500,
+        hide_if_empty=True,
+    )
+
+    def get_children(self, request, parent):
+        return parent.get_related_ips().restrict(request.user, 'view')
 
 
 #
 # VLAN groups
 #
 
-class VLANGroupListView(PermissionRequiredMixin, ObjectListView):
-    permission_required = 'ipam.view_vlangroup'
-    queryset = VLANGroup.objects.select_related('site').annotate(vlan_count=Count('vlans'))
-    filter = filters.VLANGroupFilter
-    filter_form = forms.VLANGroupFilterForm
+@register_model_view(VLANGroup, 'list', path='', detail=False)
+class VLANGroupListView(generic.ObjectListView):
+    queryset = VLANGroup.objects.annotate_utilization()
+    filterset = filtersets.VLANGroupFilterSet
+    filterset_form = forms.VLANGroupFilterForm
     table = tables.VLANGroupTable
-    template_name = 'ipam/vlangroup_list.html'
 
 
-class VLANGroupCreateView(PermissionRequiredMixin, ObjectEditView):
-    permission_required = 'ipam.add_vlangroup'
-    model = VLANGroup
-    model_form = forms.VLANGroupForm
-    default_return_url = 'ipam:vlangroup_list'
+@register_model_view(VLANGroup)
+class VLANGroupView(GetRelatedModelsMixin, generic.ObjectView):
+    queryset = VLANGroup.objects.annotate_utilization()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.VLANGroupPanel(),
+            TagsPanel(),
+        ],
+        right_panels=[
+            RelatedObjectsPanel(),
+            CommentsPanel(),
+            CustomFieldsPanel(),
+        ],
+    )
 
-
-class VLANGroupEditView(VLANGroupCreateView):
-    permission_required = 'ipam.change_vlangroup'
-
-
-class VLANGroupBulkImportView(PermissionRequiredMixin, BulkImportView):
-    permission_required = 'ipam.add_vlangroup'
-    model_form = forms.VLANGroupCSVForm
-    table = tables.VLANGroupTable
-    default_return_url = 'ipam:vlangroup_list'
-
-
-class VLANGroupBulkDeleteView(PermissionRequiredMixin, BulkDeleteView):
-    permission_required = 'ipam.delete_vlangroup'
-    queryset = VLANGroup.objects.select_related('site').annotate(vlan_count=Count('vlans'))
-    filter = filters.VLANGroupFilter
-    table = tables.VLANGroupTable
-    default_return_url = 'ipam:vlangroup_list'
-
-
-class VLANGroupVLANsView(PermissionRequiredMixin, View):
-    permission_required = 'ipam.view_vlangroup'
-
-    def get(self, request, pk):
-
-        vlan_group = get_object_or_404(VLANGroup.objects.all(), pk=pk)
-
-        vlans = VLAN.objects.filter(group_id=pk)
-        vlans = add_available_vlans(vlan_group, vlans)
-
-        vlan_table = tables.VLANDetailTable(vlans)
-        if request.user.has_perm('ipam.change_vlan') or request.user.has_perm('ipam.delete_vlan'):
-            vlan_table.columns.show('pk')
-        vlan_table.columns.hide('site')
-        vlan_table.columns.hide('group')
-
-        paginate = {
-            'paginator_class': EnhancedPaginator,
-            'per_page': request.GET.get('per_page', settings.PAGINATE_COUNT)
-        }
-        RequestConfig(request, paginate).configure(vlan_table)
-
-        # Compile permissions list for rendering the object table
-        permissions = {
-            'add': request.user.has_perm('ipam.add_vlan'),
-            'change': request.user.has_perm('ipam.change_vlan'),
-            'delete': request.user.has_perm('ipam.delete_vlan'),
+    def get_extra_context(self, request, instance):
+        return {
+            'related_models': self.get_related_models(request, instance),
         }
 
-        return render(request, 'ipam/vlangroup_vlans.html', {
-            'vlan_group': vlan_group,
-            'first_available_vlan': vlan_group.get_next_available_vid(),
-            'vlan_table': vlan_table,
-            'permissions': permissions,
-        })
+
+@register_model_view(VLANGroup, 'add', detail=False)
+@register_model_view(VLANGroup, 'edit')
+class VLANGroupEditView(generic.ObjectEditView):
+    queryset = VLANGroup.objects.all()
+    form = forms.VLANGroupForm
+
+
+@register_model_view(VLANGroup, 'delete')
+class VLANGroupDeleteView(generic.ObjectDeleteView):
+    queryset = VLANGroup.objects.all()
+
+
+@register_model_view(VLANGroup, 'bulk_import', path='import', detail=False)
+class VLANGroupBulkImportView(generic.BulkImportView):
+    queryset = VLANGroup.objects.all()
+    model_form = forms.VLANGroupImportForm
+
+
+@register_model_view(VLANGroup, 'bulk_edit', path='edit', detail=False)
+class VLANGroupBulkEditView(generic.BulkEditView):
+    queryset = VLANGroup.objects.annotate_utilization().prefetch_related('tags')
+    filterset = filtersets.VLANGroupFilterSet
+    table = tables.VLANGroupTable
+    form = forms.VLANGroupBulkEditForm
+
+
+@register_model_view(VLANGroup, 'bulk_rename', path='rename', detail=False)
+class VLANGroupBulkRenameView(generic.BulkRenameView):
+    queryset = VLANGroup.objects.all()
+    filterset = filtersets.VLANGroupFilterSet
+
+
+@register_model_view(VLANGroup, 'bulk_delete', path='delete', detail=False)
+class VLANGroupBulkDeleteView(generic.BulkDeleteView):
+    queryset = VLANGroup.objects.annotate_utilization().prefetch_related('tags')
+    filterset = filtersets.VLANGroupFilterSet
+    table = tables.VLANGroupTable
+
+
+@register_model_view(VLANGroup, 'vlans')
+class VLANGroupVLANsView(generic.ObjectChildrenView):
+    queryset = VLANGroup.objects.all()
+    child_model = VLAN
+    table = tables.VLANTable
+    filterset = filtersets.VLANFilterSet
+    filterset_form = forms.VLANFilterForm
+    tab = ViewTab(
+        label=_('VLANs'),
+        badge=lambda x: x.get_child_vlans().count(),
+        permission='ipam.view_vlan',
+        weight=500
+    )
+
+    def get_children(self, request, parent):
+        return parent.get_child_vlans().restrict(request.user, 'view').prefetch_related(
+            Prefetch('prefixes', queryset=Prefix.objects.restrict(request.user)),
+            'tenant', 'site', 'role',
+        )
+
+    def prep_table_data(self, request, queryset, parent):
+        if not get_table_ordering(request, self.table):
+            return add_available_vlans(queryset, parent)
+        return queryset
+
+
+#
+# VLAN Translation Policies
+#
+
+@register_model_view(VLANTranslationPolicy, 'list', path='', detail=False)
+class VLANTranslationPolicyListView(generic.ObjectListView):
+    queryset = VLANTranslationPolicy.objects.annotate(
+        rule_count=count_related(VLANTranslationRule, 'policy'),
+    )
+    filterset = filtersets.VLANTranslationPolicyFilterSet
+    filterset_form = forms.VLANTranslationPolicyFilterForm
+    table = tables.VLANTranslationPolicyTable
+
+
+@register_model_view(VLANTranslationPolicy)
+class VLANTranslationPolicyView(generic.ObjectView):
+    queryset = VLANTranslationPolicy.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.VLANTranslationPolicyPanel(),
+        ],
+        right_panels=[
+            TagsPanel(),
+            CustomFieldsPanel(),
+            CommentsPanel(),
+        ],
+        bottom_panels=[
+            ObjectsTablePanel(
+                'ipam.vlantranslationrule',
+                filters={'policy_id': lambda ctx: ctx['object'].pk},
+                title=_('VLAN translation rules'),
+                actions=[
+                    actions.AddObject(
+                        'ipam.vlantranslationrule',
+                        url_params={'policy': lambda ctx: ctx['object'].pk},
+                        label=_('Add Rule'),
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+@register_model_view(VLANTranslationPolicy, 'add', detail=False)
+@register_model_view(VLANTranslationPolicy, 'edit')
+class VLANTranslationPolicyEditView(generic.ObjectEditView):
+    queryset = VLANTranslationPolicy.objects.all()
+    form = forms.VLANTranslationPolicyForm
+
+
+@register_model_view(VLANTranslationPolicy, 'delete')
+class VLANTranslationPolicyDeleteView(generic.ObjectDeleteView):
+    queryset = VLANTranslationPolicy.objects.all()
+
+
+@register_model_view(VLANTranslationPolicy, 'bulk_import', path='import', detail=False)
+class VLANTranslationPolicyBulkImportView(generic.BulkImportView):
+    queryset = VLANTranslationPolicy.objects.all()
+    model_form = forms.VLANTranslationPolicyImportForm
+
+
+@register_model_view(VLANTranslationPolicy, 'bulk_edit', path='edit', detail=False)
+class VLANTranslationPolicyBulkEditView(generic.BulkEditView):
+    queryset = VLANTranslationPolicy.objects.all()
+    filterset = filtersets.VLANTranslationPolicyFilterSet
+    table = tables.VLANTranslationPolicyTable
+    form = forms.VLANTranslationPolicyBulkEditForm
+
+
+@register_model_view(VLANTranslationPolicy, 'bulk_rename', path='rename', detail=False)
+class VLANTranslationPolicyBulkRenameView(generic.BulkRenameView):
+    queryset = VLANTranslationPolicy.objects.all()
+    filterset = filtersets.VLANTranslationPolicyFilterSet
+
+
+@register_model_view(VLANTranslationPolicy, 'bulk_delete', path='delete', detail=False)
+class VLANTranslationPolicyBulkDeleteView(generic.BulkDeleteView):
+    queryset = VLANTranslationPolicy.objects.all()
+    filterset = filtersets.VLANTranslationPolicyFilterSet
+    table = tables.VLANTranslationPolicyTable
+
+
+#
+# VLAN Translation Rules
+#
+
+@register_model_view(VLANTranslationRule, 'list', path='', detail=False)
+class VLANTranslationRuleListView(generic.ObjectListView):
+    queryset = VLANTranslationRule.objects.all()
+    filterset = filtersets.VLANTranslationRuleFilterSet
+    filterset_form = forms.VLANTranslationRuleFilterForm
+    table = tables.VLANTranslationRuleTable
+    actions = (AddObject, BulkImport, BulkExport, BulkEdit, BulkDelete)
+
+
+@register_model_view(VLANTranslationRule)
+class VLANTranslationRuleView(generic.ObjectView):
+    queryset = VLANTranslationRule.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.VLANTranslationRulePanel(),
+        ],
+        right_panels=[
+            TagsPanel(),
+            CustomFieldsPanel(),
+        ],
+    )
+
+
+@register_model_view(VLANTranslationRule, 'add', detail=False)
+@register_model_view(VLANTranslationRule, 'edit')
+class VLANTranslationRuleEditView(generic.ObjectEditView):
+    queryset = VLANTranslationRule.objects.all()
+    form = forms.VLANTranslationRuleForm
+
+
+@register_model_view(VLANTranslationRule, 'delete')
+class VLANTranslationRuleDeleteView(generic.ObjectDeleteView):
+    queryset = VLANTranslationRule.objects.all()
+
+
+@register_model_view(VLANTranslationRule, 'bulk_import', path='import', detail=False)
+class VLANTranslationRuleBulkImportView(generic.BulkImportView):
+    queryset = VLANTranslationRule.objects.all()
+    model_form = forms.VLANTranslationRuleImportForm
+
+
+@register_model_view(VLANTranslationRule, 'bulk_edit', path='edit', detail=False)
+class VLANTranslationRuleBulkEditView(generic.BulkEditView):
+    queryset = VLANTranslationRule.objects.all()
+    filterset = filtersets.VLANTranslationRuleFilterSet
+    table = tables.VLANTranslationRuleTable
+    form = forms.VLANTranslationRuleBulkEditForm
+
+
+@register_model_view(VLANTranslationRule, 'bulk_delete', path='delete', detail=False)
+class VLANTranslationRuleBulkDeleteView(generic.BulkDeleteView):
+    queryset = VLANTranslationRule.objects.all()
+    filterset = filtersets.VLANTranslationRuleFilterSet
+    table = tables.VLANTranslationRuleTable
+
+
+#
+# FHRP groups
+#
+
+@register_model_view(FHRPGroup, 'list', path='', detail=False)
+class FHRPGroupListView(generic.ObjectListView):
+    queryset = FHRPGroup.objects.annotate(
+        member_count=count_related(FHRPGroupAssignment, 'group')
+    )
+    filterset = filtersets.FHRPGroupFilterSet
+    filterset_form = forms.FHRPGroupFilterForm
+    table = tables.FHRPGroupTable
+
+
+@register_model_view(FHRPGroup)
+class FHRPGroupView(GetRelatedModelsMixin, generic.ObjectView):
+    queryset = FHRPGroup.objects.annotate(
+        member_count=count_related(FHRPGroupAssignment, 'group')
+    )
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.FHRPGroupPanel(),
+            TagsPanel(),
+            CommentsPanel(),
+        ],
+        right_panels=[
+            panels.FHRPGroupAuthPanel(),
+            RelatedObjectsPanel(),
+            CustomFieldsPanel(),
+        ],
+        bottom_panels=[
+            ObjectsTablePanel(
+                'ipam.ipaddress',
+                filters={'fhrpgroup_id': lambda ctx: ctx['object'].pk},
+                title=_('Virtual IP addresses'),
+                actions=[
+                    actions.AddObject(
+                        'ipam.ipaddress',
+                        url_params={'fhrpgroup': lambda ctx: ctx['object'].pk},
+                        label=_('Add IP Address'),
+                    ),
+                ],
+            ),
+            ContextTablePanel('members_table', title=_('Members')),
+        ],
+    )
+
+    def get_extra_context(self, request, instance):
+        # Get assigned interfaces
+        members_table = tables.FHRPGroupAssignmentTable(
+            data=FHRPGroupAssignment.objects.restrict(request.user, 'view').filter(group=instance),
+            orderable=False
+        )
+        members_table.configure(request)
+        members_table.columns.hide('group')
+
+        return {
+            'related_models': self.get_related_models(
+                request, instance,
+                extra=(
+                    (
+                        Service.objects.restrict(request.user, 'view').filter(
+                            parent_object_type=ContentType.objects.get_for_model(FHRPGroup),
+                            parent_object_id=instance.id,
+                        ),
+                        'fhrpgroup_id'
+                    ),
+                ),
+            ),
+            'members_table': members_table,
+        }
+
+
+@register_model_view(FHRPGroup, 'add', detail=False)
+@register_model_view(FHRPGroup, 'edit')
+class FHRPGroupEditView(generic.ObjectEditView):
+    queryset = FHRPGroup.objects.all()
+    form = forms.FHRPGroupForm
+
+    def get_return_url(self, request, obj=None):
+        return_url = super().get_return_url(request, obj)
+
+        # If we're redirecting the user to the FHRPGroupAssignment creation form,
+        # initialize the group field with the FHRPGroup we just saved.
+        if return_url.startswith(reverse('ipam:fhrpgroupassignment_add')):
+            return_url += f'&group={obj.pk}'
+
+        return return_url
+
+    def alter_object(self, obj, request, url_args, url_kwargs):
+        # Workaround to solve #10719. Capture the current user on the FHRPGroup instance so that
+        # we can evaluate permissions during the creation of a new IPAddress within the form.
+        obj._user = request.user
+        return obj
+
+
+@register_model_view(FHRPGroup, 'delete')
+class FHRPGroupDeleteView(generic.ObjectDeleteView):
+    queryset = FHRPGroup.objects.all()
+
+
+@register_model_view(FHRPGroup, 'bulk_import', path='import', detail=False)
+class FHRPGroupBulkImportView(generic.BulkImportView):
+    queryset = FHRPGroup.objects.all()
+    model_form = forms.FHRPGroupImportForm
+
+
+@register_model_view(FHRPGroup, 'bulk_edit', path='edit', detail=False)
+class FHRPGroupBulkEditView(generic.BulkEditView):
+    queryset = FHRPGroup.objects.all()
+    filterset = filtersets.FHRPGroupFilterSet
+    table = tables.FHRPGroupTable
+    form = forms.FHRPGroupBulkEditForm
+
+
+@register_model_view(FHRPGroup, 'bulk_rename', path='rename', detail=False)
+class FHRPGroupBulkRenameView(generic.BulkRenameView):
+    queryset = FHRPGroup.objects.all()
+    filterset = filtersets.FHRPGroupFilterSet
+
+
+@register_model_view(FHRPGroup, 'bulk_delete', path='delete', detail=False)
+class FHRPGroupBulkDeleteView(generic.BulkDeleteView):
+    queryset = FHRPGroup.objects.all()
+    filterset = filtersets.FHRPGroupFilterSet
+    table = tables.FHRPGroupTable
+
+
+#
+# FHRP group assignments
+#
+
+@register_model_view(FHRPGroupAssignment, 'add', detail=False)
+@register_model_view(FHRPGroupAssignment, 'edit')
+class FHRPGroupAssignmentEditView(generic.ObjectEditView):
+    queryset = FHRPGroupAssignment.objects.all()
+    form = forms.FHRPGroupAssignmentForm
+
+    def alter_object(self, instance, request, args, kwargs):
+        if not instance.pk:
+            # Assign the interface based on URL kwargs
+            content_type = get_object_or_404(ContentType, pk=request.GET.get('interface_type'))
+            instance.interface = get_object_or_404(content_type.model_class(), pk=request.GET.get('interface_id'))
+        return instance
+
+    def get_extra_addanother_params(self, request):
+        return {
+            'interface_type': request.GET.get('interface_type'),
+            'interface_id': request.GET.get('interface_id'),
+        }
+
+
+@register_model_view(FHRPGroupAssignment, 'delete')
+class FHRPGroupAssignmentDeleteView(generic.ObjectDeleteView):
+    queryset = FHRPGroupAssignment.objects.all()
 
 
 #
 # VLANs
 #
 
-class VLANListView(PermissionRequiredMixin, ObjectListView):
-    permission_required = 'ipam.view_vlan'
-    queryset = VLAN.objects.select_related('site', 'group', 'tenant', 'role').prefetch_related('prefixes')
-    filter = filters.VLANFilter
-    filter_form = forms.VLANFilterForm
-    table = tables.VLANDetailTable
-    template_name = 'ipam/vlan_list.html'
-
-
-class VLANView(PermissionRequiredMixin, View):
-    permission_required = 'ipam.view_vlan'
-
-    def get(self, request, pk):
-
-        vlan = get_object_or_404(VLAN.objects.select_related(
-            'site__region', 'tenant__group', 'role'
-        ), pk=pk)
-        prefixes = Prefix.objects.filter(vlan=vlan).select_related('vrf', 'site', 'role')
-        prefix_table = tables.PrefixTable(list(prefixes), orderable=False)
-        prefix_table.exclude = ('vlan',)
-
-        return render(request, 'ipam/vlan.html', {
-            'vlan': vlan,
-            'prefix_table': prefix_table,
-        })
-
-
-class VLANMembersView(PermissionRequiredMixin, View):
-    permission_required = 'ipam.view_vlan'
-
-    def get(self, request, pk):
-
-        vlan = get_object_or_404(VLAN.objects.all(), pk=pk)
-        members = vlan.get_members().select_related('device', 'virtual_machine')
-
-        members_table = tables.VLANMemberTable(members)
-
-        paginate = {
-            'paginator_class': EnhancedPaginator,
-            'per_page': request.GET.get('per_page', settings.PAGINATE_COUNT)
-        }
-        RequestConfig(request, paginate).configure(members_table)
-
-        return render(request, 'ipam/vlan_members.html', {
-            'vlan': vlan,
-            'members_table': members_table,
-            'active_tab': 'members',
-        })
-
-
-class VLANCreateView(PermissionRequiredMixin, ObjectEditView):
-    permission_required = 'ipam.add_vlan'
-    model = VLAN
-    model_form = forms.VLANForm
-    template_name = 'ipam/vlan_edit.html'
-    default_return_url = 'ipam:vlan_list'
-
-
-class VLANEditView(VLANCreateView):
-    permission_required = 'ipam.change_vlan'
-
-
-class VLANDeleteView(PermissionRequiredMixin, ObjectDeleteView):
-    permission_required = 'ipam.delete_vlan'
-    model = VLAN
-    default_return_url = 'ipam:vlan_list'
-
-
-class VLANBulkImportView(PermissionRequiredMixin, BulkImportView):
-    permission_required = 'ipam.add_vlan'
-    model_form = forms.VLANCSVForm
+@register_model_view(VLAN, 'list', path='', detail=False)
+class VLANListView(generic.ObjectListView):
+    queryset = VLAN.objects.all()
+    filterset = filtersets.VLANFilterSet
+    filterset_form = forms.VLANFilterForm
     table = tables.VLANTable
-    default_return_url = 'ipam:vlan_list'
 
 
-class VLANBulkEditView(PermissionRequiredMixin, BulkEditView):
-    permission_required = 'ipam.change_vlan'
-    queryset = VLAN.objects.select_related('site', 'group', 'tenant', 'role')
-    filter = filters.VLANFilter
+@register_model_view(VLAN)
+class VLANView(generic.ObjectView):
+    queryset = VLAN.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.VLANPanel(),
+        ],
+        right_panels=[
+            CustomFieldsPanel(),
+            TagsPanel(),
+            CommentsPanel(),
+        ],
+        bottom_panels=[
+            ObjectsTablePanel(
+                'ipam.prefix',
+                filters={'vlan_id': lambda ctx: ctx['object'].pk},
+                title=_('Prefixes'),
+                actions=[
+                    actions.AddObject(
+                        'ipam.prefix',
+                        url_params={
+                            'tenant': lambda ctx: ctx['object'].tenant.pk if ctx['object'].tenant else None,
+                            'site': lambda ctx: ctx['object'].site.pk if ctx['object'].site else None,
+                            'vlan': lambda ctx: ctx['object'].pk,
+                        },
+                        label=_('Add a Prefix'),
+                    ),
+                ],
+            ),
+            panels.VLANCustomerVLANsPanel(),
+        ],
+    )
+
+
+@register_model_view(VLAN, 'interfaces')
+class VLANInterfacesView(generic.ObjectChildrenView):
+    queryset = VLAN.objects.all()
+    child_model = Interface
+    table = tables.VLANDevicesTable
+    filterset = InterfaceFilterSet
+    filterset_form = InterfaceFilterForm
+    tab = ViewTab(
+        label=_('Device Interfaces'),
+        badge=lambda x: x.get_interfaces().count(),
+        permission='dcim.view_interface',
+        weight=500
+    )
+
+    def get_children(self, request, parent):
+        return parent.get_interfaces().restrict(request.user, 'view')
+
+
+@register_model_view(VLAN, 'vminterfaces', path='vm-interfaces')
+class VLANVMInterfacesView(generic.ObjectChildrenView):
+    queryset = VLAN.objects.all()
+    child_model = VMInterface
+    table = tables.VLANVirtualMachinesTable
+    filterset = VMInterfaceFilterSet
+    filterset_form = VMInterfaceFilterForm
+    tab = ViewTab(
+        label=_('VM Interfaces'),
+        badge=lambda x: x.get_vminterfaces().count(),
+        permission='virtualization.view_vminterface',
+        weight=510
+    )
+
+    def get_children(self, request, parent):
+        return parent.get_vminterfaces().restrict(request.user, 'view')
+
+
+@register_model_view(VLAN, 'add', detail=False)
+@register_model_view(VLAN, 'edit')
+class VLANEditView(generic.ObjectEditView):
+    queryset = VLAN.objects.all()
+    form = forms.VLANForm
+    template_name = 'ipam/vlan_edit.html'
+
+
+@register_model_view(VLAN, 'delete')
+class VLANDeleteView(generic.ObjectDeleteView):
+    queryset = VLAN.objects.all()
+
+
+@register_model_view(VLAN, 'bulk_import', path='import', detail=False)
+class VLANBulkImportView(generic.BulkImportView):
+    queryset = VLAN.objects.all()
+    model_form = forms.VLANImportForm
+
+
+@register_model_view(VLAN, 'bulk_edit', path='edit', detail=False)
+class VLANBulkEditView(generic.BulkEditView):
+    queryset = VLAN.objects.all()
+    filterset = filtersets.VLANFilterSet
     table = tables.VLANTable
     form = forms.VLANBulkEditForm
-    default_return_url = 'ipam:vlan_list'
 
 
-class VLANBulkDeleteView(PermissionRequiredMixin, BulkDeleteView):
-    permission_required = 'ipam.delete_vlan'
-    queryset = VLAN.objects.select_related('site', 'group', 'tenant', 'role')
-    filter = filters.VLANFilter
+@register_model_view(VLAN, 'bulk_rename', path='rename', detail=False)
+class VLANBulkRenameView(generic.BulkRenameView):
+    queryset = VLAN.objects.all()
+    filterset = filtersets.VLANFilterSet
+
+
+@register_model_view(VLAN, 'bulk_delete', path='delete', detail=False)
+class VLANBulkDeleteView(generic.BulkDeleteView):
+    queryset = VLAN.objects.all()
+    filterset = filtersets.VLANFilterSet
     table = tables.VLANTable
-    default_return_url = 'ipam:vlan_list'
+
+
+#
+# Service templates
+#
+
+@register_model_view(ServiceTemplate, 'list', path='', detail=False)
+class ServiceTemplateListView(generic.ObjectListView):
+    queryset = ServiceTemplate.objects.all()
+    filterset = filtersets.ServiceTemplateFilterSet
+    filterset_form = forms.ServiceTemplateFilterForm
+    table = tables.ServiceTemplateTable
+
+
+@register_model_view(ServiceTemplate)
+class ServiceTemplateView(generic.ObjectView):
+    queryset = ServiceTemplate.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.ServiceTemplatePanel(),
+        ],
+        right_panels=[
+            CustomFieldsPanel(),
+            TagsPanel(),
+            CommentsPanel(),
+        ],
+    )
+
+
+@register_model_view(ServiceTemplate, 'add', detail=False)
+@register_model_view(ServiceTemplate, 'edit')
+class ServiceTemplateEditView(generic.ObjectEditView):
+    queryset = ServiceTemplate.objects.all()
+    form = forms.ServiceTemplateForm
+
+
+@register_model_view(ServiceTemplate, 'delete')
+class ServiceTemplateDeleteView(generic.ObjectDeleteView):
+    queryset = ServiceTemplate.objects.all()
+
+
+@register_model_view(ServiceTemplate, 'bulk_import', path='import', detail=False)
+class ServiceTemplateBulkImportView(generic.BulkImportView):
+    queryset = ServiceTemplate.objects.all()
+    model_form = forms.ServiceTemplateImportForm
+
+
+@register_model_view(ServiceTemplate, 'bulk_edit', path='edit', detail=False)
+class ServiceTemplateBulkEditView(generic.BulkEditView):
+    queryset = ServiceTemplate.objects.all()
+    filterset = filtersets.ServiceTemplateFilterSet
+    table = tables.ServiceTemplateTable
+    form = forms.ServiceTemplateBulkEditForm
+
+
+@register_model_view(ServiceTemplate, 'bulk_rename', path='rename', detail=False)
+class ServiceTemplateBulkRenameView(generic.BulkRenameView):
+    queryset = ServiceTemplate.objects.all()
+    filterset = filtersets.ServiceTemplateFilterSet
+
+
+@register_model_view(ServiceTemplate, 'bulk_delete', path='delete', detail=False)
+class ServiceTemplateBulkDeleteView(generic.BulkDeleteView):
+    queryset = ServiceTemplate.objects.all()
+    filterset = filtersets.ServiceTemplateFilterSet
+    table = tables.ServiceTemplateTable
 
 
 #
 # Services
 #
 
-class ServiceListView(PermissionRequiredMixin, ObjectListView):
-    permission_required = 'ipam.view_service'
-    queryset = Service.objects.select_related('device', 'virtual_machine')
-    filter = filters.ServiceFilter
-    filter_form = forms.ServiceFilterForm
+@register_model_view(Service, 'list', path='', detail=False)
+class ServiceListView(generic.ObjectListView):
+    queryset = Service.objects.prefetch_related('parent')
+    filterset = filtersets.ServiceFilterSet
+    filterset_form = forms.ServiceFilterForm
     table = tables.ServiceTable
-    template_name = 'ipam/service_list.html'
 
 
-class ServiceView(PermissionRequiredMixin, View):
-    permission_required = 'ipam.view_service'
+@register_model_view(Service)
+class ServiceView(generic.ObjectView):
+    queryset = Service.objects.all()
+    layout = layout.SimpleLayout(
+        left_panels=[
+            panels.ServicePanel(),
+        ],
+        right_panels=[
+            CustomFieldsPanel(),
+            TagsPanel(),
+            CommentsPanel(),
+        ],
+    )
 
-    def get(self, request, pk):
+    def get_extra_context(self, request, instance):
+        context = {}
+        match instance.parent:
+            case Device():
+                context['breadcrumb_queryparam'] = 'device_id'
+            case VirtualMachine():
+                context['breadcrumb_queryparam'] = 'virtual_machine_id'
+            case FHRPGroup():
+                context['breadcrumb_queryparam'] = 'fhrpgroup_id'
 
-        service = get_object_or_404(Service, pk=pk)
-
-        return render(request, 'ipam/service.html', {
-            'service': service,
-        })
-
-
-class ServiceCreateView(PermissionRequiredMixin, ObjectEditView):
-    permission_required = 'ipam.add_service'
-    model = Service
-    model_form = forms.ServiceForm
-    template_name = 'ipam/service_edit.html'
-
-    def alter_obj(self, obj, request, url_args, url_kwargs):
-        if 'device' in url_kwargs:
-            obj.device = get_object_or_404(Device, pk=url_kwargs['device'])
-        elif 'virtualmachine' in url_kwargs:
-            obj.virtual_machine = get_object_or_404(VirtualMachine, pk=url_kwargs['virtualmachine'])
-        return obj
-
-    def get_return_url(self, request, service):
-        return service.parent.get_absolute_url()
+        return context
 
 
-class ServiceEditView(ServiceCreateView):
-    permission_required = 'ipam.change_service'
+@register_model_view(Service, 'add', detail=False)
+class ServiceCreateView(generic.ObjectEditView):
+    queryset = Service.objects.all()
+    form = forms.ServiceCreateForm
 
 
-class ServiceDeleteView(PermissionRequiredMixin, ObjectDeleteView):
-    permission_required = 'ipam.delete_service'
-    model = Service
+@register_model_view(Service, 'edit')
+class ServiceEditView(generic.ObjectEditView):
+    queryset = Service.objects.all()
+    form = forms.ServiceForm
 
 
-class ServiceBulkEditView(PermissionRequiredMixin, BulkEditView):
-    permission_required = 'ipam.change_service'
-    queryset = Service.objects.select_related('device', 'virtual_machine')
-    filter = filters.ServiceFilter
+@register_model_view(Service, 'delete')
+class ServiceDeleteView(generic.ObjectDeleteView):
+    queryset = Service.objects.all()
+
+
+@register_model_view(Service, 'bulk_import', path='import', detail=False)
+class ServiceBulkImportView(generic.BulkImportView):
+    queryset = Service.objects.all()
+    model_form = forms.ServiceImportForm
+
+
+@register_model_view(Service, 'bulk_edit', path='edit', detail=False)
+class ServiceBulkEditView(generic.BulkEditView):
+    queryset = Service.objects.prefetch_related('parent')
+    filterset = filtersets.ServiceFilterSet
     table = tables.ServiceTable
     form = forms.ServiceBulkEditForm
-    default_return_url = 'ipam:service_list'
 
 
-class ServiceBulkDeleteView(PermissionRequiredMixin, BulkDeleteView):
-    permission_required = 'ipam.delete_service'
-    queryset = Service.objects.select_related('device', 'virtual_machine')
-    filter = filters.ServiceFilter
+@register_model_view(Service, 'bulk_rename', path='rename', detail=False)
+class ServiceBulkRenameView(generic.BulkRenameView):
+    queryset = Service.objects.all()
+    filterset = filtersets.ServiceFilterSet
+
+
+@register_model_view(Service, 'bulk_delete', path='delete', detail=False)
+class ServiceBulkDeleteView(generic.BulkDeleteView):
+    queryset = Service.objects.prefetch_related('parent')
+    filterset = filtersets.ServiceFilterSet
     table = tables.ServiceTable
-    default_return_url = 'ipam:service_list'

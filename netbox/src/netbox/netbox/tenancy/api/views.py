@@ -1,54 +1,65 @@
-from circuits.models import Circuit
-from dcim.models import Device, Rack, Site
-from extras.api.views import CustomFieldModelViewSet
-from ipam.models import IPAddress, Prefix, VLAN, VRF
-from tenancy import filters
-from tenancy.models import Tenant, TenantGroup
-from utilities.api import FieldChoicesViewSet, ModelViewSet
-from utilities.utils import get_subquery
-from virtualization.models import VirtualMachine
+from rest_framework.routers import APIRootView
+
+from netbox.api.viewsets import MPTTLockedMixin, NetBoxModelViewSet
+from tenancy import filtersets
+from tenancy.models import *
+
 from . import serializers
 
 
-#
-# Field choices
-#
-
-class TenancyFieldChoicesViewSet(FieldChoicesViewSet):
-    fields = ()
-
-
-#
-# Tenant Groups
-#
-
-class TenantGroupViewSet(ModelViewSet):
-    queryset = TenantGroup.objects.annotate(
-        tenant_count=get_subquery(Tenant, 'group')
-    )
-    serializer_class = serializers.TenantGroupSerializer
-    filterset_class = filters.TenantGroupFilter
+class TenancyRootView(APIRootView):
+    """
+    Tenancy API root view
+    """
+    def get_view_name(self):
+        return 'Tenancy'
 
 
 #
 # Tenants
 #
 
-class TenantViewSet(CustomFieldModelViewSet):
-    queryset = Tenant.objects.select_related(
-        'group'
-    ).prefetch_related(
-        'tags'
-    ).annotate(
-        circuit_count=get_subquery(Circuit, 'tenant'),
-        device_count=get_subquery(Device, 'tenant'),
-        ipaddress_count=get_subquery(IPAddress, 'tenant'),
-        prefix_count=get_subquery(Prefix, 'tenant'),
-        rack_count=get_subquery(Rack, 'tenant'),
-        site_count=get_subquery(Site, 'tenant'),
-        virtualmachine_count=get_subquery(VirtualMachine, 'tenant'),
-        vlan_count=get_subquery(VLAN, 'tenant'),
-        vrf_count=get_subquery(VRF, 'tenant')
+class TenantGroupViewSet(MPTTLockedMixin, NetBoxModelViewSet):
+    queryset = TenantGroup.objects.add_related_count(
+        TenantGroup.objects.all(),
+        Tenant,
+        'group',
+        'tenant_count',
+        cumulative=True
     )
+    serializer_class = serializers.TenantGroupSerializer
+    filterset_class = filtersets.TenantGroupFilterSet
+
+
+class TenantViewSet(NetBoxModelViewSet):
+    queryset = Tenant.objects.all()
     serializer_class = serializers.TenantSerializer
-    filterset_class = filters.TenantFilter
+    filterset_class = filtersets.TenantFilterSet
+
+
+#
+# Contacts
+#
+
+class ContactGroupViewSet(MPTTLockedMixin, NetBoxModelViewSet):
+    queryset = ContactGroup.objects.annotate_contacts()
+    serializer_class = serializers.ContactGroupSerializer
+    filterset_class = filtersets.ContactGroupFilterSet
+
+
+class ContactRoleViewSet(NetBoxModelViewSet):
+    queryset = ContactRole.objects.all()
+    serializer_class = serializers.ContactRoleSerializer
+    filterset_class = filtersets.ContactRoleFilterSet
+
+
+class ContactViewSet(NetBoxModelViewSet):
+    queryset = Contact.objects.all()
+    serializer_class = serializers.ContactSerializer
+    filterset_class = filtersets.ContactFilterSet
+
+
+class ContactAssignmentViewSet(NetBoxModelViewSet):
+    queryset = ContactAssignment.objects.all()
+    serializer_class = serializers.ContactAssignmentSerializer
+    filterset_class = filtersets.ContactAssignmentFilterSet

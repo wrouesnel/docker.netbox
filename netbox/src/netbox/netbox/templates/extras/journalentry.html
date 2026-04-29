@@ -1,0 +1,7 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+
+{% block breadcrumbs %}
+  {{ block.super }}
+  <li class="breadcrumb-item"><a href="{% action_url object.assigned_object 'journal' pk=object.assigned_object.pk %}">{{ object.assigned_object }}</a></li>
+{% endblock %}

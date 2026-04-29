@@ -1,0 +1,24 @@
+# lock-threads (https://github.com/marketplace/actions/lock-threads)
+name: Lock threads
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+  discussions: write
+
+concurrency:
+  group: lock-threads
+
+jobs:
+  lock:
+    if: github.repository == 'netbox-community/netbox'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dessant/lock-threads@7266a7ce5c1df01b1c6db85bf8cd86c737dadbe7 # v6.0.0
+        with:
+          discussion-inactive-days: 180

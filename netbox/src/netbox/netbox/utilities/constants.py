@@ -1,29 +1,110 @@
-COLOR_CHOICES = (
-    ('aa1409', 'Dark red'),
-    ('f44336', 'Red'),
-    ('e91e63', 'Pink'),
-    ('ffe4e1', 'Rose'),
-    ('ff66ff', 'Fuschia'),
-    ('9c27b0', 'Purple'),
-    ('673ab7', 'Dark purple'),
-    ('3f51b5', 'Indigo'),
-    ('2196f3', 'Blue'),
-    ('03a9f4', 'Light blue'),
-    ('00bcd4', 'Cyan'),
-    ('009688', 'Teal'),
-    ('00ffff', 'Aqua'),
-    ('2f6a31', 'Dark green'),
-    ('4caf50', 'Green'),
-    ('8bc34a', 'Light green'),
-    ('cddc39', 'Lime'),
-    ('ffeb3b', 'Yellow'),
-    ('ffc107', 'Amber'),
-    ('ff9800', 'Orange'),
-    ('ff5722', 'Dark orange'),
-    ('795548', 'Brown'),
-    ('c0c0c0', 'Light grey'),
-    ('9e9e9e', 'Grey'),
-    ('607d8b', 'Dark grey'),
-    ('111111', 'Black'),
-    ('ffffff', 'White'),
+#
+# Filter lookup expressions
+#
+
+FILTER_CHAR_BASED_LOOKUP_MAP = dict(
+    n='exact',
+    ic='icontains',
+    nic='icontains',
+    iew='iendswith',
+    niew='iendswith',
+    isw='istartswith',
+    nisw='istartswith',
+    ie='iexact',
+    nie='iexact',
+    empty='empty',
+    regex='regex',
+    iregex='iregex',
 )
+
+FILTER_NUMERIC_BASED_LOOKUP_MAP = dict(
+    n='exact',
+    lte='lte',
+    lt='lt',
+    gte='gte',
+    gt='gt',
+    empty='isnull',
+)
+
+FILTER_NEGATION_LOOKUP_MAP = dict(
+    n='exact'
+)
+
+FILTER_TREENODE_NEGATION_LOOKUP_MAP = dict(
+    n='in'
+)
+
+#
+# HTTP Request META safe copy
+#
+
+# Non-HTTP_ META keys to include when copying a request (whitelist)
+HTTP_REQUEST_META_SAFE_COPY = [
+    'CONTENT_LENGTH',
+    'CONTENT_TYPE',
+    'HTTP_ACCEPT',
+    'HTTP_ACCEPT_ENCODING',
+    'HTTP_ACCEPT_LANGUAGE',
+    'HTTP_HOST',
+    'HTTP_REFERER',
+    'HTTP_USER_AGENT',
+    'HTTP_X_FORWARDED_FOR',
+    'HTTP_X_FORWARDED_HOST',
+    'HTTP_X_FORWARDED_PORT',
+    'HTTP_X_FORWARDED_PROTO',
+    'HTTP_X_REAL_IP',
+    'QUERY_STRING',
+    'REMOTE_ADDR',
+    'REMOTE_HOST',
+    'REMOTE_USER',
+    'REQUEST_METHOD',
+    'SERVER_NAME',
+    'SERVER_PORT',
+]
+
+# HTTP_ META keys known to carry sensitive data; excluded when copying a request (denylist)
+HTTP_REQUEST_META_SENSITIVE = {
+    'HTTP_AUTHORIZATION',
+    'HTTP_COOKIE',
+    'HTTP_PROXY_AUTHORIZATION',
+}
+
+
+#
+# CSV-style format delimiters
+#
+
+CSV_DELIMITERS = {
+    'comma': ',',
+    'semicolon': ';',
+    'pipe': '|',
+    'tab': '\t',
+}
+
+
+#
+# HTML allowed tags & attributes
+#
+
+HTML_ALLOWED_TAGS = {
+    "a", "b", "blockquote", "br", "code", "dd", "del", "div", "dl", "dt", "em", "h1", "h2", "h3", "h4", "h5", "h6",
+    "hr", "i", "img", "li", "ol", "p", "pre", "strong", "table", "tbody", "td", "th", "thead", "tr", "ul"
+}
+
+HTML_ALLOWED_ATTRIBUTES = {
+    "a": {"href", "title"},
+    "div": {"class"},
+    "h1": {"id"},
+    "h2": {"id"},
+    "h3": {"id"},
+    "h4": {"id"},
+    "h5": {"id"},
+    "h6": {"id"},
+    "img": {"alt", "src", "title"},
+    "td": {"align"},
+    "th": {"align"},
+}
+
+HTTP_PROXY_SUPPORTED_SOCK_SCHEMAS = ['socks4', 'socks4a', 'socks4h', 'socks5', 'socks5a', 'socks5h']
+HTTP_PROXY_SOCK_RDNS_SCHEMAS = ['socks4h', 'socks4a', 'socks5h', 'socks5a']
+HTTP_PROXY_SUPPORTED_SCHEMAS = ['http', 'https', 'socks4', 'socks4a', 'socks4h', 'socks5', 'socks5a', 'socks5h']

@@ -1,265 +1,359 @@
-from collections import OrderedDict
-
-from django.contrib.contenttypes.models import ContentType
-from django.db.models import Count
-from django.http import Http404, HttpResponse
+from django.http import Http404
 from django.shortcuts import get_object_or_404
+from django_rq.queues import get_connection
+from drf_spectacular.utils import extend_schema, extend_schema_view
+from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.generics import RetrieveUpdateDestroyAPIView
+from rest_framework.mixins import CreateModelMixin, ListModelMixin, RetrieveModelMixin
+from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
-from rest_framework.viewsets import ReadOnlyModelViewSet, ViewSet
+from rest_framework.routers import APIRootView
+from rest_framework.viewsets import ModelViewSet
+from rq import Worker
 
-from extras import filters
-from extras.models import (
-    ConfigContext, CustomFieldChoice, ExportTemplate, Graph, ImageAttachment, ObjectChange, ReportResult, TopologyMap,
-    Tag,
-)
-from extras.reports import get_report, get_reports
-from utilities.api import FieldChoicesViewSet, IsAuthenticatedOrLoginNotRequired, ModelViewSet
+from extras import filtersets
+from extras.jobs import ScriptJob
+from extras.models import *
+from netbox.api.authentication import IsAuthenticatedOrLoginNotRequired, TokenWritePermission
+from netbox.api.features import SyncedDataMixin
+from netbox.api.metadata import ContentTypeMetadata
+from netbox.api.renderers import TextRenderer
+from netbox.api.viewsets import BaseViewSet, NetBoxModelViewSet
+from netbox.api.viewsets.mixins import ObjectValidationMixin
+from utilities.exceptions import RQWorkerNotRunningException
+from utilities.request import copy_safe_request
+
 from . import serializers
+from .mixins import ConfigTemplateRenderMixin
 
 
-#
-# Field choices
-#
-
-class ExtrasFieldChoicesViewSet(FieldChoicesViewSet):
-    fields = (
-        (ExportTemplate, ['template_language']),
-        (Graph, ['type']),
-        (ObjectChange, ['action']),
-    )
-
-
-#
-# Custom field choices
-#
-
-class CustomFieldChoicesViewSet(ViewSet):
+class ExtrasRootView(APIRootView):
     """
+    Extras API root view
     """
-    permission_classes = [IsAuthenticatedOrLoginNotRequired]
-
-    def __init__(self, *args, **kwargs):
-        super(CustomFieldChoicesViewSet, self).__init__(*args, **kwargs)
-
-        self._fields = OrderedDict()
-
-        for cfc in CustomFieldChoice.objects.all():
-            self._fields.setdefault(cfc.field.name, {})
-            self._fields[cfc.field.name][cfc.value] = cfc.pk
-
-    def list(self, request):
-        return Response(self._fields)
-
-    def retrieve(self, request, pk):
-        if pk not in self._fields:
-            raise Http404
-        return Response(self._fields[pk])
-
     def get_view_name(self):
-        return "Custom Field choices"
+        return 'Extras'
+
+
+#
+# EventRules
+#
+
+class EventRuleViewSet(NetBoxModelViewSet):
+    metadata_class = ContentTypeMetadata
+    queryset = EventRule.objects.all()
+    serializer_class = serializers.EventRuleSerializer
+    filterset_class = filtersets.EventRuleFilterSet
+
+
+#
+# Webhooks
+#
+
+class WebhookViewSet(NetBoxModelViewSet):
+    metadata_class = ContentTypeMetadata
+    queryset = Webhook.objects.all()
+    serializer_class = serializers.WebhookSerializer
+    filterset_class = filtersets.WebhookFilterSet
 
 
 #
 # Custom fields
 #
 
-class CustomFieldModelViewSet(ModelViewSet):
-    """
-    Include the applicable set of CustomFields in the ModelViewSet context.
-    """
+class CustomFieldViewSet(NetBoxModelViewSet):
+    metadata_class = ContentTypeMetadata
+    queryset = CustomField.objects.select_related('choice_set')
+    serializer_class = serializers.CustomFieldSerializer
+    filterset_class = filtersets.CustomFieldFilterSet
 
-    def get_serializer_context(self):
 
-        # Gather all custom fields for the model
-        content_type = ContentType.objects.get_for_model(self.queryset.model)
-        custom_fields = content_type.custom_fields.prefetch_related('choices')
+class CustomFieldChoiceSetViewSet(NetBoxModelViewSet):
+    queryset = CustomFieldChoiceSet.objects.all()
+    serializer_class = serializers.CustomFieldChoiceSetSerializer
+    filterset_class = filtersets.CustomFieldChoiceSetFilterSet
 
-        # Cache all relevant CustomFieldChoices. This saves us from having to do a lookup per select field per object.
-        custom_field_choices = {}
-        for field in custom_fields:
-            for cfc in field.choices.all():
-                custom_field_choices[cfc.id] = cfc.value
-        custom_field_choices = custom_field_choices
+    @action(detail=True)
+    def choices(self, request, pk):
+        """
+        Provides an endpoint to iterate through each choice in a set.
+        """
+        choiceset = get_object_or_404(self.queryset, pk=pk)
+        choices = choiceset.choices
 
-        context = super().get_serializer_context()
-        context.update({
-            'custom_fields': custom_fields,
-            'custom_field_choices': custom_field_choices,
-        })
-        return context
+        # Enable filtering
+        if q := request.GET.get('q'):
+            q = q.lower()
+            choices = [c for c in choices if q in c[0].lower() or q in c[1].lower()]
 
-    def get_queryset(self):
-        # Prefetch custom field values
-        return super().get_queryset().prefetch_related('custom_field_values__field')
+        # Paginate data
+        if page := self.paginate_queryset(choices):
+            data = [
+                {'id': c[0], 'display': c[1]} for c in page
+            ]
+        else:
+            data = []
+
+        return self.get_paginated_response(data)
 
 
 #
-# Graphs
+# Custom links
 #
 
-class GraphViewSet(ModelViewSet):
-    queryset = Graph.objects.all()
-    serializer_class = serializers.GraphSerializer
-    filterset_class = filters.GraphFilter
+class CustomLinkViewSet(NetBoxModelViewSet):
+    metadata_class = ContentTypeMetadata
+    queryset = CustomLink.objects.all()
+    serializer_class = serializers.CustomLinkSerializer
+    filterset_class = filtersets.CustomLinkFilterSet
 
 
 #
 # Export templates
 #
 
-class ExportTemplateViewSet(ModelViewSet):
+class ExportTemplateViewSet(SyncedDataMixin, NetBoxModelViewSet):
+    metadata_class = ContentTypeMetadata
     queryset = ExportTemplate.objects.all()
     serializer_class = serializers.ExportTemplateSerializer
-    filterset_class = filters.ExportTemplateFilter
+    filterset_class = filtersets.ExportTemplateFilterSet
 
 
 #
-# Topology maps
+# Saved filters
 #
 
-class TopologyMapViewSet(ModelViewSet):
-    queryset = TopologyMap.objects.select_related('site')
-    serializer_class = serializers.TopologyMapSerializer
-    filterset_class = filters.TopologyMapFilter
+class SavedFilterViewSet(NetBoxModelViewSet):
+    metadata_class = ContentTypeMetadata
+    queryset = SavedFilter.objects.all()
+    serializer_class = serializers.SavedFilterSerializer
+    filterset_class = filtersets.SavedFilterFilterSet
 
-    @action(detail=True)
-    def render(self, request, pk):
 
-        tmap = get_object_or_404(TopologyMap, pk=pk)
-        img_format = 'png'
+#
+# Table Configs
+#
 
-        try:
-            data = tmap.render(img_format=img_format)
-        except Exception as e:
-            return HttpResponse(
-                "There was an error generating the requested graph: %s" % e
-            )
+class TableConfigViewSet(NetBoxModelViewSet):
+    metadata_class = ContentTypeMetadata
+    queryset = TableConfig.objects.all()
+    serializer_class = serializers.TableConfigSerializer
+    filterset_class = filtersets.TableConfigFilterSet
 
-        response = HttpResponse(data, content_type='image/{}'.format(img_format))
-        response['Content-Disposition'] = 'inline; filename="{}.{}"'.format(tmap.slug, img_format)
 
-        return response
+#
+# Bookmarks
+#
+
+class BookmarkViewSet(NetBoxModelViewSet):
+    metadata_class = ContentTypeMetadata
+    queryset = Bookmark.objects.all()
+    serializer_class = serializers.BookmarkSerializer
+    filterset_class = filtersets.BookmarkFilterSet
+
+
+#
+# Notifications & subscriptions
+#
+
+class NotificationViewSet(NetBoxModelViewSet):
+    metadata_class = ContentTypeMetadata
+    queryset = Notification.objects.all()
+    serializer_class = serializers.NotificationSerializer
+
+
+class NotificationGroupViewSet(NetBoxModelViewSet):
+    queryset = NotificationGroup.objects.all()
+    serializer_class = serializers.NotificationGroupSerializer
+
+
+class SubscriptionViewSet(NetBoxModelViewSet):
+    metadata_class = ContentTypeMetadata
+    queryset = Subscription.objects.all()
+    serializer_class = serializers.SubscriptionSerializer
 
 
 #
 # Tags
 #
 
-class TagViewSet(ModelViewSet):
-    queryset = Tag.objects.annotate(
-        tagged_items=Count('extras_taggeditem_items', distinct=True)
-    )
+class TagViewSet(NetBoxModelViewSet):
+    queryset = Tag.objects.all()
     serializer_class = serializers.TagSerializer
-    filterset_class = filters.TagFilter
+    filterset_class = filtersets.TagFilterSet
+
+
+class TaggedItemViewSet(RetrieveModelMixin, ListModelMixin, BaseViewSet):
+    queryset = TaggedItem.objects.prefetch_related(
+        'content_type', 'content_object', 'tag'
+    ).order_by('tag__weight', 'tag__name')
+    serializer_class = serializers.TaggedItemSerializer
+    filterset_class = filtersets.TaggedItemFilterSet
 
 
 #
 # Image attachments
 #
 
-class ImageAttachmentViewSet(ModelViewSet):
+class ImageAttachmentViewSet(NetBoxModelViewSet):
+    metadata_class = ContentTypeMetadata
     queryset = ImageAttachment.objects.all()
     serializer_class = serializers.ImageAttachmentSerializer
+    filterset_class = filtersets.ImageAttachmentFilterSet
+
+
+#
+# Journal entries
+#
+
+class JournalEntryViewSet(NetBoxModelViewSet):
+    metadata_class = ContentTypeMetadata
+    queryset = JournalEntry.objects.all()
+    serializer_class = serializers.JournalEntrySerializer
+    filterset_class = filtersets.JournalEntryFilterSet
 
 
 #
 # Config contexts
 #
 
-class ConfigContextViewSet(ModelViewSet):
-    queryset = ConfigContext.objects.prefetch_related(
-        'regions', 'sites', 'roles', 'platforms', 'tenant_groups', 'tenants',
-    )
+class ConfigContextProfileViewSet(SyncedDataMixin, NetBoxModelViewSet):
+    queryset = ConfigContextProfile.objects.all()
+    serializer_class = serializers.ConfigContextProfileSerializer
+    filterset_class = filtersets.ConfigContextProfileFilterSet
+
+
+class ConfigContextViewSet(SyncedDataMixin, NetBoxModelViewSet):
+    queryset = ConfigContext.objects.all()
     serializer_class = serializers.ConfigContextSerializer
-    filterset_class = filters.ConfigContextFilter
+    filterset_class = filtersets.ConfigContextFilterSet
 
 
 #
-# Reports
+# Config templates
 #
 
-class ReportViewSet(ViewSet):
+class ConfigTemplateViewSet(SyncedDataMixin, ConfigTemplateRenderMixin, NetBoxModelViewSet):
+    queryset = ConfigTemplate.objects.all()
+    serializer_class = serializers.ConfigTemplateSerializer
+    filterset_class = filtersets.ConfigTemplateFilterSet
+
+    def get_permissions(self):
+        # For render action, check only token write ability (not model permissions)
+        if self.action == 'render':
+            return [TokenWritePermission()]
+        return super().get_permissions()
+
+    @action(detail=True, methods=['post'], renderer_classes=[JSONRenderer, TextRenderer])
+    def render(self, request, pk):
+        """
+        Render a ConfigTemplate using the context data provided (if any). If the client requests "text/plain" data,
+        return the raw rendered content, rather than serialized JSON.
+        """
+        # Override restrict() on the default queryset to enforce the render & view actions
+        self.queryset = self.queryset.model.objects.restrict(request.user, 'render').restrict(request.user, 'view')
+        configtemplate = self.get_object()
+
+        context = request.data
+
+        return self.render_configtemplate(request, configtemplate, context)
+
+
+#
+# Scripts
+#
+
+class ScriptModuleViewSet(ObjectValidationMixin, CreateModelMixin, BaseViewSet):
+    queryset = ScriptModule.objects.all()
+    serializer_class = serializers.ScriptModuleSerializer
+
+
+@extend_schema_view(
+    update=extend_schema(request=serializers.ScriptInputSerializer),
+    partial_update=extend_schema(request=serializers.ScriptInputSerializer),
+)
+class ScriptViewSet(ModelViewSet):
     permission_classes = [IsAuthenticatedOrLoginNotRequired]
+    queryset = Script.objects.all()
+    serializer_class = serializers.ScriptSerializer
+    filterset_class = filtersets.ScriptFilterSet
+
     _ignore_model_permissions = True
-    exclude_from_schema = True
     lookup_value_regex = '[^/]+'  # Allow dots
 
-    def _retrieve_report(self, pk):
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
 
-        # Read the PK as "<module>.<report>"
-        if '.' not in pk:
+        # Restrict the view's QuerySet to allow only the permitted objects
+        if request.user.is_authenticated:
+            action = 'run' if request.method == 'POST' else 'view'
+            self.queryset = self.queryset.restrict(request.user, action)
+
+    def _get_script(self, pk):
+        # If pk is numeric, retrieve script by ID
+        if pk.isnumeric():
+            return get_object_or_404(self.queryset, pk=pk)
+
+        # Default to retrieval by module & name
+        try:
+            module_name, script_name = pk.split('.', maxsplit=1)
+        except ValueError:
             raise Http404
-        module_name, report_name = pk.split('.', 1)
 
-        # Raise a 404 on an invalid Report module/name
-        report = get_report(module_name, report_name)
-        if report is None:
-            raise Http404
-
-        return report
-
-    def list(self, request):
-        """
-        Compile all reports and their related results (if any). Result data is deferred in the list view.
-        """
-        report_list = []
-
-        # Iterate through all available Reports.
-        for module_name, reports in get_reports():
-            for report in reports:
-
-                # Attach the relevant ReportResult (if any) to each Report.
-                report.result = ReportResult.objects.filter(report=report.full_name).defer('data').first()
-                report_list.append(report)
-
-        serializer = serializers.ReportSerializer(report_list, many=True, context={
-            'request': request,
-        })
-
-        return Response(serializer.data)
+        return get_object_or_404(self.queryset, module__file_path=f'{module_name}.py', name=script_name)
 
     def retrieve(self, request, pk):
-        """
-        Retrieve a single Report identified as "<module>.<report>".
-        """
-
-        # Retrieve the Report and ReportResult, if any.
-        report = self._retrieve_report(pk)
-        report.result = ReportResult.objects.filter(report=report.full_name).first()
-
-        serializer = serializers.ReportDetailSerializer(report)
+        script = self._get_script(pk)
+        serializer = serializers.ScriptDetailSerializer(script, context={'request': request})
 
         return Response(serializer.data)
 
-    @action(detail=True, methods=['post'])
-    def run(self, request, pk):
+    def post(self, request, pk):
         """
-        Run a Report and create a new ReportResult, overwriting any previous result for the Report.
+        Run a Script identified by its numeric PK or module & name and return the pending Job as the result
         """
 
-        # Check that the user has permission to run reports.
-        if not request.user.has_perm('extras.add_reportresult'):
-            raise PermissionDenied("This user does not have permission to run reports.")
+        script = self._get_script(pk)
 
-        # Retrieve and run the Report. This will create a new ReportResult.
-        report = self._retrieve_report(pk)
-        report.run()
+        if not request.user.has_perm('extras.run_script', obj=script):
+            raise PermissionDenied("This user does not have permission to run this script.")
 
-        serializer = serializers.ReportDetailSerializer(report)
+        input_serializer = serializers.ScriptInputSerializer(
+            data=request.data,
+            context={'script': script}
+        )
 
-        return Response(serializer.data)
+        # Check that at least one RQ worker is running
+        if not Worker.count(get_connection('default')):
+            raise RQWorkerNotRunningException()
+
+        if input_serializer.is_valid():
+            ScriptJob.enqueue(
+                instance=script,
+                user=request.user,
+                data=input_serializer.data['data'],
+                request=copy_safe_request(request),
+                commit=input_serializer.data['commit'],
+                job_timeout=script.python_class.job_timeout,
+                schedule_at=input_serializer.validated_data.get('schedule_at'),
+                interval=input_serializer.validated_data.get('interval')
+            )
+            serializer = serializers.ScriptDetailSerializer(script, context={'request': request})
+
+            return Response(serializer.data)
+
+        return Response(input_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 #
-# Change logging
+# User dashboard
 #
 
-class ObjectChangeViewSet(ReadOnlyModelViewSet):
-    """
-    Retrieve a list of recent changes.
-    """
-    queryset = ObjectChange.objects.select_related('user')
-    serializer_class = serializers.ObjectChangeSerializer
-    filterset_class = filters.ObjectChangeFilter
+class DashboardView(RetrieveUpdateDestroyAPIView):
+    queryset = Dashboard.objects.all()
+    serializer_class = serializers.DashboardSerializer
+
+    def get_object(self):
+        return Dashboard.objects.filter(user=self.request.user).first()

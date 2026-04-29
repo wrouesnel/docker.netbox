@@ -1,0 +1,10 @@
+{% extends 'generic/object.html' %}
+{% load i18n %}
+
+{# Omit assigned IP addresses from object representation #}
+{% block title %}{{ object.get_protocol_display }}: {{ object.group_id }}{% endblock %}
+
+{% block breadcrumbs %}
+  {{ block.super }}
+  <li class="breadcrumb-item"><a href="{% url 'ipam:fhrpgroup_list' %}?protocol={{ object.protocol }}">{{ object.get_protocol_display }}</a></li>
+{% endblock breadcrumbs %}

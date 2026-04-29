@@ -1,79 +1,126 @@
-from django.db.models import Count
-from django.shortcuts import get_object_or_404
-from rest_framework.decorators import action
-from rest_framework.response import Response
+from rest_framework.routers import APIRootView
 
-from circuits import filters
-from circuits.models import Provider, CircuitTermination, CircuitType, Circuit
-from extras.api.serializers import RenderedGraphSerializer
-from extras.api.views import CustomFieldModelViewSet
-from extras.models import Graph, GRAPH_TYPE_PROVIDER
-from utilities.api import FieldChoicesViewSet, ModelViewSet
+from circuits import filtersets
+from circuits.models import *
+from dcim.api.views import PassThroughPortMixin
+from netbox.api.viewsets import NetBoxModelViewSet
+
 from . import serializers
 
 
-#
-# Field choices
-#
-
-class CircuitsFieldChoicesViewSet(FieldChoicesViewSet):
-    fields = (
-        (Circuit, ['status']),
-        (CircuitTermination, ['term_side']),
-    )
+class CircuitsRootView(APIRootView):
+    """
+    Circuits API root view
+    """
+    def get_view_name(self):
+        return 'Circuits'
 
 
 #
 # Providers
 #
 
-class ProviderViewSet(CustomFieldModelViewSet):
-    queryset = Provider.objects.prefetch_related('tags').annotate(
-        circuit_count=Count('circuits')
-    )
+class ProviderViewSet(NetBoxModelViewSet):
+    queryset = Provider.objects.all()
     serializer_class = serializers.ProviderSerializer
-    filterset_class = filters.ProviderFilter
-
-    @action(detail=True)
-    def graphs(self, request, pk=None):
-        """
-        A convenience method for rendering graphs for a particular provider.
-        """
-        provider = get_object_or_404(Provider, pk=pk)
-        queryset = Graph.objects.filter(type=GRAPH_TYPE_PROVIDER)
-        serializer = RenderedGraphSerializer(queryset, many=True, context={'graphed_object': provider})
-        return Response(serializer.data)
+    filterset_class = filtersets.ProviderFilterSet
 
 
 #
 #  Circuit Types
 #
 
-class CircuitTypeViewSet(ModelViewSet):
-    queryset = CircuitType.objects.annotate(
-        circuit_count=Count('circuits')
-    )
+class CircuitTypeViewSet(NetBoxModelViewSet):
+    queryset = CircuitType.objects.all()
     serializer_class = serializers.CircuitTypeSerializer
-    filterset_class = filters.CircuitTypeFilter
+    filterset_class = filtersets.CircuitTypeFilterSet
 
 
 #
 # Circuits
 #
 
-class CircuitViewSet(CustomFieldModelViewSet):
-    queryset = Circuit.objects.select_related('type', 'tenant', 'provider').prefetch_related('tags')
+class CircuitViewSet(NetBoxModelViewSet):
+    queryset = Circuit.objects.all()
     serializer_class = serializers.CircuitSerializer
-    filterset_class = filters.CircuitFilter
+    filterset_class = filtersets.CircuitFilterSet
 
 
 #
 # Circuit Terminations
 #
 
-class CircuitTerminationViewSet(ModelViewSet):
-    queryset = CircuitTermination.objects.select_related(
-        'circuit', 'site', 'connected_endpoint__device', 'cable'
-    )
+class CircuitTerminationViewSet(PassThroughPortMixin, NetBoxModelViewSet):
+    queryset = CircuitTermination.objects.all()
     serializer_class = serializers.CircuitTerminationSerializer
-    filterset_class = filters.CircuitTerminationFilter
+    filterset_class = filtersets.CircuitTerminationFilterSet
+
+
+#
+# Circuit Groups
+#
+
+class CircuitGroupViewSet(NetBoxModelViewSet):
+    queryset = CircuitGroup.objects.all()
+    serializer_class = serializers.CircuitGroupSerializer
+    filterset_class = filtersets.CircuitGroupFilterSet
+
+
+#
+# Circuit Group Assignments
+#
+
+class CircuitGroupAssignmentViewSet(NetBoxModelViewSet):
+    queryset = CircuitGroupAssignment.objects.all()
+    serializer_class = serializers.CircuitGroupAssignmentSerializer
+    filterset_class = filtersets.CircuitGroupAssignmentFilterSet
+
+
+#
+# Provider accounts
+#
+
+class ProviderAccountViewSet(NetBoxModelViewSet):
+    queryset = ProviderAccount.objects.all()
+    serializer_class = serializers.ProviderAccountSerializer
+    filterset_class = filtersets.ProviderAccountFilterSet
+
+
+#
+# Provider networks
+#
+
+class ProviderNetworkViewSet(NetBoxModelViewSet):
+    queryset = ProviderNetwork.objects.all()
+    serializer_class = serializers.ProviderNetworkSerializer
+    filterset_class = filtersets.ProviderNetworkFilterSet
+
+
+#
+#  Virtual circuit types
+#
+
+class VirtualCircuitTypeViewSet(NetBoxModelViewSet):
+    queryset = VirtualCircuitType.objects.all()
+    serializer_class = serializers.VirtualCircuitTypeSerializer
+    filterset_class = filtersets.VirtualCircuitTypeFilterSet
+
+
+#
+# Virtual circuits
+#
+
+class VirtualCircuitViewSet(NetBoxModelViewSet):
+    queryset = VirtualCircuit.objects.all()
+    serializer_class = serializers.VirtualCircuitSerializer
+    filterset_class = filtersets.VirtualCircuitFilterSet
+
+
+#
+# Virtual circuit terminations
+#
+
+class VirtualCircuitTerminationViewSet(PassThroughPortMixin, NetBoxModelViewSet):
+    queryset = VirtualCircuitTermination.objects.all()
+    serializer_class = serializers.VirtualCircuitTerminationSerializer
+    filterset_class = filtersets.VirtualCircuitTerminationFilterSet

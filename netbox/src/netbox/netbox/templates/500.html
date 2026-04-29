@@ -1,48 +1,57 @@
+{% load i18n %}
 {% load static %}
 <!DOCTYPE html>
 <html lang="en">
 
 <head>
-    <title>Server Error</title>
-    <link rel="stylesheet" href="{% static 'bootstrap-3.3.7-dist/css/bootstrap.min.css' %}">
-    <link rel="stylesheet" href="{% static 'font-awesome-4.7.0/css/font-awesome.min.css' %}">
-    <meta charset="UTF-8">
+  <title>{% trans "Server Error" %}</title>
+  <link rel="stylesheet" href="{% static 'netbox.css'%}" />
+  <meta charset="UTF-8">
 </head>
 
 <body>
-    <div class="container-fluid">
-        <div class="row">
-            <div class="col-md-6 col-md-offset-3">
-                <div class="panel panel-danger" style="margin-top: 200px">
-                    <div class="panel-heading">
-                        <strong>
-                            <i class="fa fa-warning"></i>
-                            Server Error
-                        </strong>
-                    </div>
-                    <div class="panel-body">
-                        {% block message %}
-                            <p>
-                                There was a problem with your request. Please contact an administrator.
-                            </p>
-                        {% endblock %}
-                        <hr />
-                        <p>
-                            The complete exception is provided below:
-                        </p>
-<pre><strong>{{ exception }}</strong><br />
-{{ error }}</pre>
-                        <p>
-                            If further assistance is required, please post to the <a href="https://groups.google.com/forum/#!forum/netbox-discuss">NetBox mailing list</a>.
-                        </p>
-                        <div class="text-right">
-                            <a href="{% url 'home' %}" class="btn btn-primary">Home Page</a>
-                        </div>
-                    </div>
-                </div>
+  <div class="container-fluid">
+    <div class="row">
+      <div class="col col-md-6 offset-md-3">
+        <div class="card border-danger mt-5">
+          <h2 class="card-header text-bg-danger">
+            <i class="mdi mdi-alert"></i> {% trans "Server Error" %}
+          </h2>
+          <div class="card-body">
+            {% block message %}
+              <p>
+                {% trans "There was a problem with your request. Please contact an administrator" %}.
+              </p>
+            {% endblock %}
+            <hr />
+            <p>
+              {% trans "The complete exception is provided below" %}:
+            </p>
+            <pre class="block"><strong>{{ exception }}</strong><br />
+{{ error }}
+
+{% trans "Python version" %}: {{ python_version }}
+{% trans "NetBox version" %}: {{ netbox_version }}
+{% trans "Plugins" %}: {% for plugin, version in plugins.items %}
+  {{ plugin }}: {{ version }}{% empty %}{% trans "None installed" %}{% endfor %}
+</pre>
+            <p>
+              {% trans "The request which yielded the above error is shown below:" %}
+            </p>
+            <p>
+              <code>{{ request.method }} {{ request.build_absolute_uri }}</code>
+            </p>
+            <p>
+              {% trans "If further assistance is required, please post to the" %} <a href="https://github.com/netbox-community/netbox/discussions">{% trans "NetBox discussion forum" %}</a> {% trans "on GitHub" %}.
+            </p>
+            <div class="text-end">
+              <a href="{% url 'home' %}" class="btn btn-primary">{% trans "Home Page" %}</a>
             </div>
+          </div>
         </div>
+      </div>
     </div>
+  </div>
 </body>
 
 </html>

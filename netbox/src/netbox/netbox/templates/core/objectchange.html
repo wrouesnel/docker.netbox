@@ -1,0 +1,21 @@
+{% extends 'generic/object.html' %}
+{% load i18n %}
+
+{% block title %}{{ object }}{% endblock %}
+
+{% block breadcrumbs %}
+  <li class="breadcrumb-item"><a href="{% url 'core:objectchange_list' %}">{% trans "Change Log" %}</a></li>
+  {% if object.related_object and object.related_object.get_absolute_url %}
+    <li class="breadcrumb-item"><a href="{{ object.related_object.get_absolute_url }}changelog/">{{ object.related_object }}</a></li>
+  {% elif object.changed_object and object.changed_object.get_absolute_url %}
+    <li class="breadcrumb-item"><a href="{{ object.changed_object.get_absolute_url }}changelog/">{{ object.changed_object }}</a></li>
+  {% elif object.changed_object and object.changed_object.get_display %}
+    <li class="breadcrumb-item">{{ object.changed_object }}</li>
+  {% else %}
+    <li class="breadcrumb-item">{{ object.object_repr }}</li>
+  {% endif %}
+{% endblock %}
+
+{# ObjectChange does not support the default add/edit/delete controls #}
+{% block control-buttons %}{% endblock %}
+{% block subtitle %}{% endblock %}

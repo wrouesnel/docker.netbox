@@ -1,0 +1,25 @@
+import strawberry
+import strawberry_django
+
+from .types import *
+
+
+@strawberry.type(name="Query")
+class TenancyQuery:
+    tenant: TenantType = strawberry_django.field()
+    tenant_list: list[TenantType] = strawberry_django.field()
+
+    tenant_group: TenantGroupType = strawberry_django.field()
+    tenant_group_list: list[TenantGroupType] = strawberry_django.field()
+
+    contact: ContactType = strawberry_django.field()
+    contact_list: list[ContactType] = strawberry_django.field()
+
+    contact_role: ContactRoleType = strawberry_django.field()
+    contact_role_list: list[ContactRoleType] = strawberry_django.field()
+
+    contact_group: ContactGroupType = strawberry_django.field()
+    contact_group_list: list[ContactGroupType] = strawberry_django.field()
+
+    contact_assignment: ContactAssignmentType = strawberry_django.field()
+    contact_assignment_list: list[ContactAssignmentType] = strawberry_django.field()
