@@ -1,9 +1,8 @@
-# Standalone PostgreSQL backed PowerDNS
 ARG DOCKER_PREFIX=
 ARG DOCKERHUB_PREFIX=
 
 # Pre-requistite builds
-FROM ${DOCKERHUB_PREFIX}golang:1.10 AS utilbuild
+FROM ${DOCKERHUB_PREFIX}golang:1.26 AS utilbuild
 
 RUN mkdir -p /go/src/local/utilsrc/
 COPY utilsrc/ /go/src/local/utilsrc/
@@ -11,16 +10,16 @@ RUN go build -o /go/bin/localip local/utilsrc/localip/cmd/localip
 
 FROM ${DOCKER_PREFIX}ubuntu:bionic
 
-ARG URL_P2CLI=https://github.com/wrouesnel/p2cli/releases/download/r5/p2
+ARG URL_P2CLI=https://github.com/wrouesnel/p2cli/releases/download/r19/p2cli_r19_linux-amd64.tar.gz
 ARG URL_NGINX_EXPORTER=https://github.com/wrouesnel/nginx_exporter/releases/download/v0.0.1/nginx_exporter
-ARG URL_PG_EXPORTER=https://github.com/wrouesnel/postgres_exporter/releases/download/v0.4.5/postgres_exporter_v0.4.5_linux-amd64.tar.gz
+ARG URL_PG_EXPORTER=https://github.com/prometheus-community/postgres_exporter/releases/download/v0.19.1/postgres_exporter-0.19.1.linux-amd64.tar.gz
 ARG URL_REVERSE_EXPORTER=https://github.com/wrouesnel/reverse_exporter/releases/download/v0.0.1/reverse_exporter_v0.0.1_linux-amd64.tar.gz
-ARG URL_PROMETHEUS=https://github.com/prometheus/prometheus/releases/download/v2.2.1/prometheus-2.2.1.linux-amd64.tar.gz
-ARG URL_ALERTMANAGER=https://github.com/prometheus/alertmanager/releases/download/v0.15.0-rc.1/alertmanager-0.15.0-rc.1.linux-amd64.tar.gz
-ARG URL_NODEEXPORTER=https://github.com/prometheus/node_exporter/releases/download/v0.16.0-rc.1/node_exporter-0.16.0-rc.1.linux-amd64.tar.gz
-ARG URL_WEBHOOK=https://github.com/adnanh/webhook/releases/download/2.6.5/webhook-linux-amd64.tar.gz
-ARG URL_MAKECERTS=https://github.com/wrouesnel/makecerts/releases/download/v0.4/makecerts.x86_64
-ARG URL_REDIS_EXPORTER=https://github.com/oliver006/redis_exporter/releases/download/v1.0.3/redis_exporter-v1.0.3.linux-amd64.tar.gz
+ARG URL_PROMETHEUS=https://github.com/prometheus/prometheus/releases/download/v3.11.3/prometheus-3.11.3.linux-amd64.tar.gz
+ARG URL_ALERTMANAGER=https://github.com/prometheus/alertmanager/releases/download/v0.32.0/alertmanager-0.32.0.linux-amd64.tar.gz
+ARG URL_NODEEXPORTER=https://github.com/prometheus/node_exporter/releases/download/v1.11.1/node_exporter-1.11.1.linux-amd64.tar.gz
+ARG URL_WEBHOOK=https://github.com/wrouesnel/webhook/releases/download/2.6.8.streaming_responses/webhook-linux-amd64.tar.gz
+ARG URL_MAKECERTS=https://github.com/wrouesnel/makecerts/releases/download/v2.0.0-beta0/makecerts_v2.0.0-beta0_linux-amd64.tar.gz
+ARG URL_REDIS_EXPORTER=https://github.com/oliver006/redis_exporter/releases/download/v1.82.0/redis_exporter-v1.82.0.linux-amd64.tar.gz
 
 ARG http_proxy=
 ARG https_proxy=
