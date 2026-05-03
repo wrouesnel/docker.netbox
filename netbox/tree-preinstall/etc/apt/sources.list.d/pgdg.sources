@@ -1,0 +1,7 @@
+Types: deb deb-src
+URIs: https://apt.postgresql.org/pub/repos/apt
+Suites: resolute-pgdg
+Architectures: amd64
+Components: main
+Signed-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+

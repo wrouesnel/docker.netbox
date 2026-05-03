@@ -30,13 +30,22 @@ SECRET_KEY = '{{NETBOX_WEB_SECRET}}'
 
 # Redis database settings. The Redis database is used for caching and background processing such as webhooks
 REDIS = {
-    'HOST': '127.0.0.1',
-    'PORT': 6379,
-    'PASSWORD': '',
-    'DATABASE': 0,
-    'CACHE_DATABASE': 1,
-    'DEFAULT_TIMEOUT': 300,
-    'SSL': False,
+    'tasks' : {
+        'HOST': '127.0.0.1',
+        'PORT': 6379,
+        'PASSWORD': '',
+        'DATABASE': 1,
+        'DEFAULT_TIMEOUT': 300,
+        'SSL': False,
+    },
+    'caching' :{
+        'HOST': '127.0.0.1',
+        'PORT': 6379,
+        'PASSWORD': '',
+        'DATABASE': 0,
+        'DEFAULT_TIMEOUT': 300,
+        'SSL': False,
+    }
 }
 
 
@@ -54,6 +63,10 @@ ADMINS = [
     # ['John Doe', 'jdoe@example.com'],
 {% endif %}
 ]
+
+API_TOKEN_PEPPERS = {
+    1: '{{NETBOX_API_TOKEN_PEPPERS}}'
+}
 
 # Optionally display a persistent banner at the top and/or bottom of every page. HTML is allowed. To display the same
 # content in both banners, define BANNER_TOP and set BANNER_BOTTOM = BANNER_TOP.

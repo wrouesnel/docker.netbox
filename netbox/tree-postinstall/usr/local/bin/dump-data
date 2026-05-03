@@ -48,5 +48,5 @@ function atexit_commands() {
 trap 'atexit_commands ; exit 1' INT TERM
 trap 'atexit_commands' EXIT
 
-python3 /opt/netbox/netbox/manage.py dumpdata
+spawn /opt/netbox/.venv/bin/python /opt/netbox/netbox/manage.py dumpdata
 exit $?

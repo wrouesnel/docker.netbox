@@ -5,6 +5,7 @@
 chown netbox /run/log/netbox
 
 # I can't think of a good reason not run migrations on start.
+source /opt/netbox/.venv/bin/activate
 python3 /opt/netbox/netbox/manage.py migrate > /run/log/netbox 2>&1 || exit 1
 
 extra_args=
@@ -12,7 +13,7 @@ if [ "$DEV_NETBOX_REMOTE_DEBUG_ENABLE" != "" ]; then
     extra_args="$extra_args --master"
 fi
 
-exec uwsgi_python36 --uwsgi-socket 127.0.0.1:8001 \
+exec uwsgi --uwsgi-socket 127.0.0.1:8001 \
                     --wsgi-file /opt/netbox/netbox/netbox/wsgi.py \
                     --uid netbox \
                     --gid www-data \

@@ -9,10 +9,10 @@ reverse_exporters:
           address: http://127.0.0.1:9113/metrics
           name: nginx
           timeout: 1s
-      - http:
-          address: http://127.0.0.1:80/lua_metrics
-          name: nginx-vhosts
-          timeout: 1s
+      #- http:
+      #    address: http://127.0.0.1:80/lua_metrics
+      #    name: nginx-vhosts
+      #    timeout: 1s
       - http:
           # Note we have to account for the external-url paths
           address: http://127.0.0.1:9100/metrics

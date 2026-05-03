@@ -20,7 +20,7 @@ function fatal() {
 }
 
 function genpassword() {
-    echo $(pwgen 48 1)
+    echo $(pwgen 50 1)
 }
 
 function stdbool() {
@@ -160,7 +160,7 @@ if [ "$(stdbool $DEV_ENTRYPOINT_DEBUG)" = "y" ]; then
     set -x
 fi
 
-export PATH=/usr/lib/postgresql/10/bin:$PATH
+export PATH=/usr/lib/postgresql/$POSTGRES_VERSION/bin:$PATH
 
 if [ -z $HOSTNAME ] ; then
     HOSTNAME=$(hostname -f)
@@ -337,15 +337,17 @@ if [ "$(stdbool ${DEV_STANDALONE})" = "y" ]; then
         # Use a subshell for the generation    
         (
             cd /run
-            makecerts --CN=$HOSTNAME --emails=generated@$HOSTNAME  --name-suffix=psql-generated \
-                server=${HOSTNAME},$(localip),localhost,127.0.0.1
-                #/run/psql-client-generated=postgres,${HOSTNAME},$(localip),localhost,127.0.0.1
+            makecerts \
+                --ca-common-name=${HOSTNAME} \
+                --name-suffix=psql-generated \
+                certificate \
+                "server=${HOSTNAME},$(localip),localhost,127.0.0.1?usage=digitalsignature&extusage=serverauth&cert=/run/server.psql-generated.crt&key=/run/server.psql-generated.key"
         
         ) || fatal "Self-signed certificate generation failed."
         
         export PSQL_SSL_SERVER_CERTCHAIN=""
         export PSQL_SSL_SERVER_CERT=/run/server.psql-generated.crt
-        export PSQL_SSL_SERVER_KEY=/run/server.psql-generated.pem
+        export PSQL_SSL_SERVER_KEY=/run/server.psql-generated.key
     fi
     
     if [ "${PSQL_SSL_CLIENT_CACERT}" != "disabled" ] && [ -z "${PSQL_SSL_CLIENT_CACERT}" ] ; then
@@ -354,16 +356,18 @@ if [ "$(stdbool ${DEV_STANDALONE})" = "y" ]; then
         # Use a subshell for the generation    
         (
             cd /run
-            makecerts --CN=$HOSTNAME --emails=generated@$HOSTNAME --name-suffix=psql-generated \
-                --load-ca-cert="/run/${HOSTNAME}.psql-generated.crt" \
-                --load-ca-key="/run/${HOSTNAME}.psql-generated.pem" \
-                client=postgres,${HOSTNAME},$(localip),localhost,127.0.0.1
+            makecerts --name-suffix=psql-generated \
+                --ca-mode=existing \
+                --ca-cert-name="/run/${HOSTNAME}.psql-generated.ca.crt" \
+                --ca-key-name="/run/${HOSTNAME}.psql-generated.ca.key" \
+                certificate \
+                "client=postgres,${HOSTNAME},$(localip),localhost,127.0.0.1?usage=digitalsignature&extusage=clientauth&cert=/run/client.psql-generated.crt&key=/run/client.psql-generated.key"
         
         ) || fatal "Self-signed certificate generation failed."
 
-        export PSQL_SSL_CLIENT_CACERT="/run/${HOSTNAME}.psql-generated.crt"
+        export PSQL_SSL_CLIENT_CACERT="/run/${HOSTNAME}.psql-generated.ca.crt"
     	export PSQL_SSL_CLIENT_CERT="/run/client.psql-generated.crt"
-	    export PSQL_SSL_CLIENT_KEY="/run/client.psql-generated.pem"
+	    export PSQL_SSL_CLIENT_KEY="/run/client.psql-generated.key"
     fi
 
 fi
@@ -484,7 +488,7 @@ chmod 700 "$PG_DATA_DIRECTORY"
 chown -R postgres "$PG_DATA_DIRECTORY"
 
 log "Creating runtime directories for postgres..."
-mkdir -m 755 -p /run/postgresql/10-main.pg_stat_tmp
+mkdir -m 755 -p /run/postgresql/$POSTGRES_VERSION-main.pg_stat_tmp
 # TODO: this doesn't work with pdns
 chmod g+s /run/postgresql
 chmod o+x /run/postgresql
@@ -505,7 +509,7 @@ if [ ! -s "$PG_DATA_DIRECTORY/PG_VERSION" ]; then
 	
     # internal start of server in order to allow set-up using psql-client		
     # does not listen on external TCP/IP and waits until start finishes
-    sudo -u postgres $(which pg_ctl) -D "/etc/postgresql/10/main" \
+    sudo -u postgres $(which pg_ctl) -D "/etc/postgresql/$POSTGRES_VERSION/main" \
         -o "-c listen_addresses='localhost'" \
         -w start
     psql=( "$(which psql)" -v "ON_ERROR_STOP=1" )
@@ -539,7 +543,7 @@ EOSQL
 #	log "PowerDNS initialization complete."
 	
 	# TODO: Save passwords to the data mount.
-	if ! sudo -u postgres $(which pg_ctl) -D "/etc/postgresql/10/main" -m fast -w stop ; then
+	if ! sudo -u postgres $(which pg_ctl) -D "/etc/postgresql/$POSTGRES_VERSION/main" -m fast -w stop ; then
 	    fatal "Error while shutting down postgres after initialization."
 	fi
 fi
@@ -553,8 +557,18 @@ else
     export NETBOX_WEB_SECRET
 fi
 
+# Ensure a API token pepper secret for netbox exists
+if [ -z "$NETBOX_API_TOKEN_PEPPERS" ]; then
+    log "Preparing token pepper secret for netbox..."
+    generate_or_load_password NETBOX_API_TOKEN_PEPPERS
+else
+    log "Using provided token pepper secret for netbox..."
+    export NETBOX_API_TOKEN_PEPPERS
+fi
+
+
 log "Creating runtime directories..."
-mkdir -m 755 -p /run/postgresql/10-main.pg_stat_tmp
+mkdir -m 755 -p /run/postgresql/18-main.pg_stat_tmp
 chmod g+s /run/postgresql
 chmod o+x /run/postgresql
 chown -R postgres /run/postgresql
@@ -591,7 +605,7 @@ done
 log "Redis daemon is up. Continuing."
 
 log "Collecting static files for netbox..."
-( cd /opt/netbox/netbox && python3 manage.py collectstatic --no-input ) || \
+( cd /opt/netbox/netbox && source /opt/netbox/.venv/bin/activate && python3 manage.py collectstatic --no-input ) || \
     fatal "Failed to collect static files for Netbox."
 
 chown -R netbox:www-data "$NETBOX_DATA_DIR"

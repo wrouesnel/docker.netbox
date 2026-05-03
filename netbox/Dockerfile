@@ -6,9 +6,11 @@ FROM ${DOCKERHUB_PREFIX}golang:1.26 AS utilbuild
 
 RUN mkdir -p /go/src/local/utilsrc/
 COPY utilsrc/ /go/src/local/utilsrc/
-RUN go build -o /go/bin/localip local/utilsrc/localip/cmd/localip
 
-FROM ${DOCKER_PREFIX}ubuntu:bionic
+WORKDIR /go/src/local/utilsrc/localip
+RUN go build -o /go/bin/localip ./cmd/localip
+
+FROM ${DOCKER_PREFIX}ubuntu:26.04
 
 ARG URL_P2CLI=https://github.com/wrouesnel/p2cli/releases/download/r19/p2cli_r19_linux-amd64.tar.gz
 ARG URL_NGINX_EXPORTER=https://github.com/wrouesnel/nginx_exporter/releases/download/v0.0.1/nginx_exporter
@@ -26,23 +28,24 @@ ARG https_proxy=
 
 COPY tree-preinstall/ /
 
-RUN apt-get update && apt-get install --no-install-recommends -y gnupg2 ca-certificates
+RUN apt update && apt install --no-install-recommends -y gnupg2 ca-certificates curl
 
-RUN find -path '/tmp/*.asc' -exec /bin/bash -c 'apt-key add {} && rm -f {}' \;
+RUN curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
 
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
-    postgresql-10 postgresql-10-repmgr barman barman-cli \
+ENV POSTGRES_VERSION=18
+
+RUN apt update && DEBIAN_FRONTEND=noninteractive apt install --no-install-recommends -y \
+    postgresql-${POSTGRES_VERSION} postgresql-${POSTGRES_VERSION}-repmgr barman barman-cli \
     redis-server \
-    nginx-extras libluajit-5.1-dev liblua5.3-0 libnginx-mod-http-lua \
+    nginx-extras \
     runit \
     syslog-ng-core syslog-ng-mod-json \
-    netcat \
+    netcat-openbsd \
     openssl \
     pwgen \
-    wget curl dnsutils apache2-utils net-tools iproute2 rsync sudo jq ssl-cert less expect nano \
+    wget curl dnsutils apache2-utils net-tools iproute2 rsync sudo jq ssl-cert less expect nano lsb-release \
     # netbox depends
     libsasl2-dev \
-    ttf-ubuntu-font-family \
     libjpeg-dev \
     libffi-dev \
     libxml2-dev \
@@ -51,34 +54,34 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --no-instal
     libssl-dev \
     libpq-dev python3 python3-dev build-essential uwsgi uwsgi-plugin-python3 && \
     # Templating engine
-    wget -O /usr/local/bin/p2 $URL_P2CLI && \
+    wget --progress=dot:giga -O - $URL_P2CLI | tar -xzvf - --strip-components=1 -C /usr/local/bin/ && \
     chmod +x /usr/local/bin/p2 && \
     # SSL certificate helper
-    wget -O /usr/local/bin/makecerts $URL_MAKECERTS && \
+    wget --progress=dot:giga -O - $URL_MAKECERTS | tar -xzvf - --strip-components=1 -C /usr/local/bin/ && \
     chmod +x /usr/local/bin/makecerts && \
     # Prometheus monitoring for nginx
     wget -O /usr/local/bin/nginx_exporter $URL_NGINX_EXPORTER && \
     chmod +x /usr/local/bin/nginx_exporter && \
     # Prometheus monitoring for Postgres
-    wget -O - $URL_PG_EXPORTER | tar -xzvf - --strip-components=1 -C /usr/local/bin/ && \
+    wget --progress=dot:giga -O - $URL_PG_EXPORTER | tar -xzvf - --strip-components=1 -C /usr/local/bin/ && \
     chmod +x /usr/local/bin/postgres_exporter && \
     # Prometheus reverse proxy
-    wget -O - $URL_REVERSE_EXPORTER | tar -xzvf - --strip-components=1 -C /usr/local/bin/ && \
+    wget --progress=dot:giga -O - $URL_REVERSE_EXPORTER | tar -xzvf - --strip-components=1 -C /usr/local/bin/ && \
     chmod +x /usr/local/bin/reverse_exporter && \
     # Prometheus node_exporter
-    wget -O - $URL_NODEEXPORTER | tar -xzvf - --strip-components=1 -C /usr/local/bin/ && \
+    wget --progress=dot:giga -O - $URL_NODEEXPORTER | tar -xzvf - --strip-components=1 -C /usr/local/bin/ && \
     chmod +x /usr/local/bin/node_exporter && \
     # Prometheus redis_exporter
-    wget -O - $URL_REDIS_EXPORTER | tar -xzvf - --strip-components=1 -C /usr/local/bin/ && \
+    wget --progress=dot:giga -O - $URL_REDIS_EXPORTER | tar -xzvf - --strip-components=1 -C /usr/local/bin/ && \
     chmod +x /usr/local/bin/redis_exporter && \
     # Prometheus
     mkdir -p /opt/prometheus && \
-    wget -O - $URL_PROMETHEUS | tar -xzvf - --strip-components=1 -C /opt/prometheus/ && \
+    wget --progress=dot:giga -O - $URL_PROMETHEUS | tar -xzvf - --strip-components=1 -C /opt/prometheus/ && \
     ln -sf /opt/prometheus/prometheus /usr/local/sbin/prometheus && \
     ln -sf /opt/prometheus/promtool /usr/local/sbin/promtool && \
     # Alertmanager
     mkdir -p /opt/alertmanager && \
-    wget -O - $URL_ALERTMANAGER | tar -xzvf - --strip-components=1 -C /opt/alertmanager/ && \
+    wget --progress=dot:giga -O - $URL_ALERTMANAGER | tar -xzvf - --strip-components=1 -C /opt/alertmanager/ && \
     ln -sf /opt/alertmanager/alertmanager /usr/local/sbin/alertmanager && \
     ln -sf /opt/alertmanager/amtool /usr/local/sbin/amtool && \
     # Webhook engine
@@ -107,23 +110,26 @@ RUN echo "[global]\nindex-url = $URL_PYPI\n" > /etc/pip.conf && \
     echo "[easy_install]\nindex-url = $URL_PYPI\n" > /usr/lib/$pyver/distutils/distutils.cfg ; \
     done
 
-RUN wget -O /tmp/get-pip.py $URL_GETPIP && \
-    python3 /tmp/get-pip.py -i $URL_PYPI && \
-    rm -f /tmp/get-pip.py && \
-    pip3 install -U pip
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+ENV PATH=$PATH:/root/.local/bin
 
 # Netbox specific build profiles
 RUN \ 
     # Install pip packages
-    pip3 install napalm ruamel.yaml django_auth_ldap napalm && \
+    # pip3 install napalm ruamel.yaml django_auth_ldap napalm && \
     # Make directories
     mkdir -p /opt/netbox
 
 # Copy the application
 COPY src/netbox/ /opt/netbox/
 
-RUN cd /opt/netbox && pip3 install -r requirements.txt && \
-    ln -sf $DATA_DIR/netbox/static /opt/netbox/netbox/static
+RUN cd /opt/netbox \
+ && uv sync \
+ && uv pip install -r base_requirements.txt -r requirements.txt \
+ && uv pip install pyuwsgi \
+ && ln -sf $DATA_DIR/netbox/static /opt/netbox/netbox/static \
+ && ln -sf /opt/netbox/netbox/project-statics/docs /opt/netbox/netbox/docs
 
 # Copy utility commands
 #COPY --from=utilbuild /go/bin/promtargets /usr/local/bin/promtargets
@@ -146,8 +152,8 @@ COPY tree-postinstall/ /
 
 # Setup the symlinks in the image for postgres.
 RUN chown -R root:postgres /etc/postgresql && \
-    rm -rf /etc/postgresql/10/main && \
-    ln -sf $PG_RUN_DIR/conf /etc/postgresql/10/main
+    rm -rf /etc/postgresql/18/main && \
+    ln -sf $PG_RUN_DIR/conf /etc/postgresql/18/main
 
 # The entrypoint generates a random password if the DB_USER_PASSWORD is unspecified.
 ENV \
@@ -236,5 +242,10 @@ RUN if [ "$PYTHON_REMOTE_DEBUGGING" = "yes" ] ; then \
     rm -rf /debug ; \
     fi
 
+
+RUN \
+    # Ensure some nginx paths exist
+    mkdir /var/lib/nginx/body \
+ && chown www-data:www-data /var/lib/nginx/body
 
 ENTRYPOINT [ "/entrypoint.bsh" ]

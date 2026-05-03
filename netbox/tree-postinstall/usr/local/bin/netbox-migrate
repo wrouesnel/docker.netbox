@@ -3,7 +3,7 @@
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games
 
-python3 /opt/netbox/netbox/manage.py migrate 2>&1
+spawn /opt/netbox/.venv/bin/python /opt/netbox/netbox/manage.py migrate 2>&1
 
 # Always return success, since the hook definitely fired.
 exit 0

@@ -56,6 +56,8 @@ http {
     proxy_buffering off;
     proxy_cache off;
 
+    variables_hash_max_size 4096;
+
     proxy_temp_path {{DATA_DIR}}/nginx/proxy 1 2;    
     proxy_cache_path {{DATA_DIR}}/nginx/cache levels=1:2 keys_zone=one:10m;
     client_body_temp_path {{DATA_DIR}}/nginx/body 1 2;
@@ -67,22 +69,22 @@ http {
     # Prometheus Metrics via Lua
     ##
     # Use lua to provide enhanced prometheus metrics for the virtual hosts
-    lua_shared_dict prometheus_metrics 10M;
-    lua_package_path "/usr/share/nginx/lua/?.lua";
-    init_by_lua '
-      prometheus = require("prometheus").init("prometheus_metrics")
-      metric_requests = prometheus:counter(
-        "nginx_http_requests_total", "Number of HTTP requests", {"host", "status"})
-      metric_latency = prometheus:histogram(
-        "nginx_http_request_duration_seconds", "HTTP request latency", {"host"})
-      metric_connections = prometheus:gauge(
-        "nginx_http_connections", "Number of HTTP connections", {"state"})
-    ';
-    log_by_lua '
-      local host = ngx.var.host:gsub("^www.", "")
-      metric_requests:inc(1, {host, ngx.var.status})
-      metric_latency:observe(tonumber(ngx.var.request_time), {host})
-    ';
+    #lua_shared_dict prometheus_metrics 10M;
+    #lua_package_path "/usr/share/nginx/lua/?.lua";
+    #init_by_lua '
+    #  prometheus = require("prometheus").init("prometheus_metrics")
+    #  metric_requests = prometheus:counter(
+    #    "nginx_http_requests_total", "Number of HTTP requests", {"host", "status"})
+    #  metric_latency = prometheus:histogram(
+    #    "nginx_http_request_duration_seconds", "HTTP request latency", {"host"})
+    #  metric_connections = prometheus:gauge(
+    #    "nginx_http_connections", "Number of HTTP connections", {"state"})
+    #';
+    #log_by_lua '
+    #  local host = ngx.var.host:gsub("^www.", "")
+    #  metric_requests:inc(1, {host, ngx.var.status})
+    #  metric_latency:observe(tonumber(ngx.var.request_time), {host})
+    #';
 
     ## 
     # Server configuration
@@ -196,17 +198,17 @@ http {
         }
         
         # This stub is used by the Lua metrics.
-        location /lua_metrics {
-            access_log off;
-            allow 127.0.0.1;
-            deny all;
-            content_by_lua '
-              metric_connections:set(ngx.var.connections_reading, {"reading"})
-              metric_connections:set(ngx.var.connections_waiting, {"waiting"})
-              metric_connections:set(ngx.var.connections_writing, {"writing"})
-              prometheus:collect()
-            ';
-        }
+        # location /lua_metrics {
+        #     access_log off;
+        #     allow 127.0.0.1;
+        #     deny all;
+        #     content_by_lua '
+        #       metric_connections:set(ngx.var.connections_reading, {"reading"})
+        #       metric_connections:set(ngx.var.connections_waiting, {"waiting"})
+        #       metric_connections:set(ngx.var.connections_writing, {"writing"})
+        #       prometheus:collect()
+        #     ';
+        # }
 
         # Helper redirect for metrics.
         location /metrics {

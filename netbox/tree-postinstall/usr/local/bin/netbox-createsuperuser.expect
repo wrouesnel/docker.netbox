@@ -4,8 +4,8 @@ set username [lindex $argv 0];
 set password [lindex $argv 1];
 set email [lindex $argv 2];
 
-spawn python3 /opt/netbox/netbox/manage.py createsuperuser --email "$email" --username "$username"
-set timeout 5
+spawn /opt/netbox/.venv/bin/python /opt/netbox/netbox/manage.py createsuperuser --skip-checks --email "$email" --username "$username"
+set timeout 20
 expect {
     "Password:" { 
         send "$password\r"

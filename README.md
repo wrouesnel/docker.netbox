@@ -141,6 +141,9 @@ at build time. Otherwise they are defined, but harmless.
   Web secret for client tokens. Leave blank to randomly generate. Only needs to be
   set if clustering.
 
+* `NETBOX_API_TOKEN_PEPPERS=`
+  Cryptographic peppers are employed to generate hashes of sensitive values on the server. This parameter defines the peppers used to hash v2 API tokens in NetBox. You must define at least one pepper before creating a v2 API token. See the API documentation for further information about how peppers are used.
+
 * `NETBOX_CHANGELOG_RETENTION_DAYS=0`
   Number of days to retain changelog changes. 0 for infinity.
 
