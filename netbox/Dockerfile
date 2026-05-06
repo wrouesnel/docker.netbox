@@ -148,6 +148,9 @@ ENV NETBOX_RUN_DIR=/run/netbox
 RUN ln -sf ${NETBOX_RUN_DIR}/configuration.py /opt/netbox/netbox/netbox/configuration.py && \
     ln -sf ${NETBOX_RUN_DIR}/ldap_config.py /opt/netbox/netbox/netbox/ldap_config.py
 
+RUN rm -rf /etc/services && \
+    mkdir /etc/services
+
 COPY tree-postinstall/ /
 
 # Setup the symlinks in the image for postgres.
