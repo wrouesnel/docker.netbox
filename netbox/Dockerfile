@@ -20,7 +20,7 @@ ARG URL_PROMETHEUS=https://github.com/prometheus/prometheus/releases/download/v3
 ARG URL_ALERTMANAGER=https://github.com/prometheus/alertmanager/releases/download/v0.32.0/alertmanager-0.32.0.linux-amd64.tar.gz
 ARG URL_NODEEXPORTER=https://github.com/prometheus/node_exporter/releases/download/v1.11.1/node_exporter-1.11.1.linux-amd64.tar.gz
 ARG URL_WEBHOOK=https://github.com/wrouesnel/webhook/releases/download/2.6.8.streaming_responses/webhook-linux-amd64.tar.gz
-ARG URL_MAKECERTS=https://github.com/wrouesnel/makecerts/releases/download/v2.0.0-beta0/makecerts_v2.0.0-beta0_linux-amd64.tar.gz
+ARG URL_MAKECERTS=https://github.com/wrouesnel/makecerts/releases/download/v2.1.0/makecerts_v2.1.0_linux-amd64.tar.gz
 ARG URL_REDIS_EXPORTER=https://github.com/oliver006/redis_exporter/releases/download/v1.82.0/redis_exporter-v1.82.0.linux-amd64.tar.gz
 
 ARG http_proxy=

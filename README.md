@@ -163,6 +163,10 @@ at build time. Otherwise they are defined, but harmless.
 * `NETBOX_LDAP_AUTH=yes`
   enable LDAP auth. Otherwise it is disabled.
 
+* `NETBOX_LDAP_CONFIG_FILE`
+  If supplied should be a path to a bind mounted file providing the LDAP configuration. Overrides all other
+  configuration parameters.
+
 * `NETBOX_LDAP_SERVER_URI=`
   URI for one or more LDAP servers, space separated - e.g. `ldaps://myserver:636`
 
