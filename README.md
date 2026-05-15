@@ -181,7 +181,10 @@ at build time. Otherwise they are defined, but harmless.
 * `NETBOX_LDAP_USER_DN_TEMPLATE=` - If specified, serves as a template for 
   binding users (and skips the need for a bind account). An example of its
   form would be `cn=%(user)s,OU=SomeOu,DC=example,DC=com`
-  
+
+* `NETBOX_LDAP_USERNAME_ATTR` - If specified sets the attribute to use for username.
+  For active directory set this to `sAMAccountName`
+
 * `NETBOX_LDAP_GROUP_BASE_DN`
   Base DN to search for user groups under.
 

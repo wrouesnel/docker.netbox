@@ -97,6 +97,9 @@ CORS_ORIGIN_REGEX_WHITELIST = [
     # r'^(https?://)?(\w+\.)?example\.com$',
 ]
 
+# The name to use for the CSRF token cookie.
+CSRF_COOKIE_NAME = 'csrftoken'
+
 # Set to True to enable server debugging. WARNING: Debugging introduces a substantial performance penalty and may reveal
 # sensitive information about your installation. Only enable debugging while performing testing. Never enable debugging
 # on a production system.
@@ -129,21 +132,37 @@ EXEMPT_VIEW_PERMISSIONS = [
     # 'ipam.prefix',
 ]
 
+# HTTP proxies NetBox should use when sending outbound HTTP requests (e.g. for webhooks).
+# HTTP_PROXIES = {
+#     'http': 'http://10.10.1.10:3128',
+#     'https': 'http://10.10.1.10:1080',
+# }
+
+
+# IP addresses recognized as internal to the system. The debugging toolbar will be available only to clients accessing
+# NetBox from an internal IP.
+INTERNAL_IPS = ('127.0.0.1', '::1')
+
 # Enable custom logging. Please see the Django documentation for detailed guidance on configuring custom logs:
 #   https://docs.djangoproject.com/en/1.11/topics/logging/
 LOGGING = {}
 
-# Setting this to True will permit only authenticated users to access any part of NetBox. By default, anonymous users
-# are permitted to access most data in NetBox (excluding secrets) but not make any changes.
-# wrouesnel: default False, we default to True
+# Automatically reset the lifetime of a valid session upon each authenticated request. Enables users to remain
+# authenticated to NetBox indefinitely.
+LOGIN_PERSISTENCE = False
+
+# Setting this to False will permit unauthenticated users to access most areas of NetBox (but not make any changes).
 LOGIN_REQUIRED = True
 
 # The length of time (in seconds) for which a user will remain logged into the web UI before being prompted to
 # re-authenticate. (Default: 1209600 [14 days])
 LOGIN_TIMEOUT = None
 
-# Setting this to True will display a "maintenance mode" banner at the top of every page.
-MAINTENANCE_MODE = False
+# Hide the login form. Useful when only allowing SSO authentication.
+LOGIN_FORM_HIDDEN = False
+
+# The view name or URL to which users are redirected after logging out.
+LOGOUT_REDIRECT_URL = 'home'
 
 # An API consumer can request an arbitrary number of objects =by appending the "limit" parameter to the URL (e.g.
 # "?limit=1000"). This setting defines the maximum limit. Setting it to 0 or None will allow an API consumer to request
@@ -158,41 +177,65 @@ MEDIA_ROOT = '{{NETBOX_DATA_DIR}}/media'
 # Expose Prometheus monitoring metrics at the HTTP endpoint '/metrics'
 METRICS_ENABLED = True
 
-# Credentials that NetBox will uses to authenticate to devices when connecting via NAPALM.
-NAPALM_USERNAME = ''
-NAPALM_PASSWORD = ''
+# Enable installed plugins. Add the name of each plugin to the list.
+PLUGINS = []
 
-# NAPALM timeout (in seconds). (Default: 30)
-NAPALM_TIMEOUT = 30
+# Remote authentication support
+{% if NETBOX_LDAP_AUTH == "y" %}
+REMOTE_AUTH_ENABLED = True
+REMOTE_AUTH_BACKEND = 'netbox.authentication.LDAPBackend'
+{% endif %}
 
-# NAPALM optional arguments (see http://napalm.readthedocs.io/en/latest/support/#optional-arguments). Arguments must
-# be provided as a dictionary.
-NAPALM_ARGS = {}
+# This repository is used to check whether there is a new release of NetBox available. Set to None to disable the
+# version check or use the URL below to check for release in the official NetBox repository.
+RELEASE_CHECK_URL = None
 
-# Determine how many objects to display per page within a list. (Default: 50)
-# wrouesnel: we default to 200 because effort
-PAGINATE_COUNT = 200
+# Maximum execution time for background tasks, in seconds.
+RQ_DEFAULT_TIMEOUT = 300
 
-# When determining the primary IP address for a device, IPv6 is preferred over IPv4 by default. Set this to True to
-# prefer IPv4 instead.
-# wrouesnel: we default to True, is normally False
-PREFER_IPV4 = True
-
-# The file path where custom reports will be stored. A trailing slash is not needed. Note that the default value of
+# The file path where custom scripts will be stored. A trailing slash is not needed. Note that the default value of
 # this setting is derived from the installed location.
-REPORTS_ROOT = '{{NETBOX_DATA_DIR}}/reports'
+# SCRIPTS_ROOT = '/opt/netbox/netbox/scripts'
+
+# The name to use for the session cookie.
+SESSION_COOKIE_NAME = 'sessionid'
 
 # By default, NetBox will store session data in the database. Alternatively, a file path can be specified here to use
 # local file storage instead. (This can be useful for enabling authentication on a standby instance with read-only
 # database access.) Note that the user as which NetBox runs must have read and write permissions to this path.
 SESSION_FILE_PATH = None
 
+# By default, NetBox will store session data in the database. Alternatively, a file path can be specified here to use
+# local file storage instead. (This can be useful for enabling authentication on a standby instance with read-only
+# database access.) Note that the user as which NetBox runs must have read and write permissions to this path.
+SESSION_FILE_PATH = None
+
+# By default the memory and disk sizes are displayed using base 10 (e.g. 1000 MB = 1 GB).
+# If you would like to use base 2 (e.g. 1024 MB = 1 GB) set this to 1024.
+# DISK_BASE_UNIT = 1024
+# RAM_BASE_UNIT = 1024
+
+# Within the STORAGES dictionary, "default" is used for image uploads, "staticfiles" is for static files and "scripts"
+# is used for custom scripts. See django-storages and django-storage-swift libraries for more details. By default the
+# following configuration is used:
+# STORAGES = {
+#     "default": {
+#         "BACKEND": "django.core.files.storage.FileSystemStorage",
+#     },
+#     "staticfiles": {
+#         "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+#     },
+#     "scripts": {
+#         "BACKEND": "extras.storage.ScriptFileSystemStorage",
+#         "OPTIONS": {
+#             "allow_overwrite": True,
+#         },
+#     },
+# }
+
 # Time zone (default: UTC)
 TIME_ZONE = '{{NETBOX_TIMEZONE}}'
 
-# The webhooks backend is disabled by default. Set this to True to enable it. Note that this requires a Redis
-# database be configured and accessible by NetBox.
-WEBHOOKS_ENABLED = True
 
 # Date/time formatting. See the following link for supported formats:
 # https://docs.djangoproject.com/en/dev/ref/templates/builtins/#date

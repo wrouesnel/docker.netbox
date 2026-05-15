@@ -127,6 +127,7 @@ COPY src/netbox/ /opt/netbox/
 RUN cd /opt/netbox \
  && uv sync \
  && uv pip install -r base_requirements.txt -r requirements.txt \
+ && uv pip install django-auth-ldap django-auth-oidc \
  && uv pip install pyuwsgi \
  && ln -sf $DATA_DIR/netbox/static /opt/netbox/netbox/static \
  && ln -sf /opt/netbox/netbox/project-statics/docs /opt/netbox/netbox/docs
@@ -206,7 +207,7 @@ ENV \
     NETBOX_TIMEZONE=UTC \
     NETBOX_LDAP_AUTH=yes \
     NETBOX_LDAP_SERVER_URI= \
-    NETBOX_LDAP_SERVER_BIND_BN=  \
+    NETBOX_LDAP_SERVER_BIND_DN=  \
     NETBOX_LDAP_SERVER_BIND_PASSWORD= \
     NETBOX_LDAP_USER_BASE_DN= \
     NETBOX_LDAP_USER_SEARCH_FILTER= \
